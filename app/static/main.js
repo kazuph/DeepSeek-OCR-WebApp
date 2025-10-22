@@ -341,6 +341,12 @@ modal.addEventListener('click', (e) => {
   if (e.target === modal) closeModal();
 });
 
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && modal && !modal.classList.contains('hidden')) {
+    closeModal();
+  }
+});
+
 modalCopyBtn.addEventListener('click', async () => {
   if (!modalContext) return;
   await copyImageToClipboard(modalContext.url);
