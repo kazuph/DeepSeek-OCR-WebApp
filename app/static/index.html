@@ -37,8 +37,8 @@
             <section class="section full-width">
               <h2>抽出テキスト</h2>
               <div class="tab-buttons">
-                <button data-mode="plain" id="tab-plain">プレーン</button>
                 <button data-mode="markdown" class="active" id="tab-markdown">マークダウン</button>
+                <button data-mode="plain" id="tab-plain">プレーン</button>
               </div>
               <div class="action-buttons">
                 <button class="icon-button" id="copy-text" title="コピー">
@@ -48,7 +48,7 @@
                   <svg><use href="#icon-download" /></svg>
                 </button>
               </div>
-              <textarea class="output" id="plain-text" readonly></textarea>
+          <textarea class="output hidden" id="plain-text" readonly></textarea>
               <div id="markdown-panel" class="hidden">
                 <textarea class="output" id="markdown-raw" readonly></textarea>
                 <div id="markdown-render"></div>
