@@ -27,7 +27,6 @@ const modalClose = document.getElementById('modal-close');
 const modalCopyBtn = document.getElementById('modal-copy');
 const modalDownloadBtn = document.getElementById('modal-download');
 const historyListEl = document.getElementById('history-list');
-const refreshHistoryBtn = document.getElementById('refresh-history');
 const iconSpriteContainer = document.getElementById('icon-sprite');
 
 let currentTextMode = 'markdown';
@@ -644,10 +643,6 @@ async function deleteHistoryEntry(id, filename) {
     setStatus('履歴の削除に失敗しました。', true);
   }
 }
-
-refreshHistoryBtn.addEventListener('click', () => {
-  fetchHistory();
-});
 
 clearResults();
 setTab('markdown');
