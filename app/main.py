@@ -5,7 +5,7 @@ from typing import List
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.ocr_engine import (
@@ -32,6 +32,11 @@ app.mount("/static", StaticFiles(directory=static_dir), name="static")
 async def root() -> str:
     index_path = static_dir / "index.html"
     return index_path.read_text(encoding="utf-8")
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon() -> FileResponse:
+    return FileResponse(static_dir / "favicon.svg")
 
 
 @app.get("/api/ping")

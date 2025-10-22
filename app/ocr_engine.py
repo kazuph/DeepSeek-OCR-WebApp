@@ -415,11 +415,28 @@ def list_history_entries(limit: int | None = None) -> List[dict[str, object]]:
         except json.JSONDecodeError:
             continue
 
+        artifacts_dir = entry_dir / "artifacts"
+        images_dir = artifacts_dir / "images"
+
+        preview_image = None
+        bounding_name = metadata.get("bounding_image")
+        if bounding_name:
+            bounding_path = artifacts_dir / bounding_name
+            if bounding_path.exists():
+                preview_image = encode_file_to_data_url(bounding_path)
+        if not preview_image:
+            crop_names = metadata.get("crops", [])
+            if crop_names and images_dir.exists():
+                first_crop = images_dir / crop_names[0]
+                if first_crop.exists():
+                    preview_image = encode_file_to_data_url(first_crop)
+
         entry = {
             "id": metadata.get("id", entry_dir.name),
             "filename": metadata.get("filename", entry_dir.name),
             "created_at": metadata.get("created_at"),
             "preview": metadata.get("preview", ""),
+            "preview_image": preview_image,
         }
         entries.append(entry)
 

@@ -1,4 +1,5 @@
 .cache/
 outputs/
+web_history/
 *.pyc
 __pycache__/

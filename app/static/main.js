@@ -28,6 +28,7 @@ const modalCopyBtn = document.getElementById('modal-copy');
 const modalDownloadBtn = document.getElementById('modal-download');
 const historyListEl = document.getElementById('history-list');
 const refreshHistoryBtn = document.getElementById('refresh-history');
+const iconSpriteContainer = document.getElementById('icon-sprite');
 
 let currentTextMode = 'markdown';
 let processing = false;
@@ -61,6 +62,19 @@ function formatDate(value) {
     return value;
   }
   return date.toLocaleString();
+}
+
+function transformMarkdown(markdown, crops) {
+  if (!markdown || !Array.isArray(crops) || !crops.length) {
+    return markdown;
+  }
+  return markdown.replace(/!\[\]\(images\/(\d+)\.(?:jpe?g|png)\)/g, (match, index) => {
+    const idx = Number.parseInt(index, 10);
+    if (Number.isNaN(idx) || !crops[idx]) {
+      return match;
+    }
+    return `![](${crops[idx]})`;
+  });
 }
 
 function clearResults() {
@@ -127,8 +141,11 @@ function displayResult(data, filename, historyId = null, createdAt = null) {
 
   plainText.value = data.text_plain || '';
   const markdownText = data.text_markdown || '';
+  const processedMarkdown = transformMarkdown(markdownText, data.crops || []);
   markdownRaw.value = markdownText;
-  markdownRender.innerHTML = markdownText ? window.marked.parse(markdownText) : '<p>マークダウン出力はありません。</p>';
+  markdownRender.innerHTML = processedMarkdown
+    ? window.marked.parse(processedMarkdown)
+    : '<p>マークダウン出力はありません。</p>';
 
   if (Array.isArray(data.crops) && data.crops.length > 0) {
     cropsGrid.innerHTML = '';
@@ -374,6 +391,7 @@ function closeModal() {
 }
 
 function renderQueue() {
+  if (!queueListEl) return;
   queueListEl.innerHTML = '';
 
   if (processing && currentItem) {
@@ -399,11 +417,21 @@ function renderQueue() {
   }
 
   if (!processing && queue.length === 0) {
-    const empty = document.createElement('div');
-    empty.className = 'queue-item';
-    empty.innerHTML = '<span class="queue-name">キューは空です</span>';
-    queueListEl.appendChild(empty);
+    queueListEl.innerHTML = '';
   }
+}
+
+function loadIcons() {
+  if (!iconSpriteContainer) return;
+  fetch('/static/icons.svg')
+    .then((res) => {
+      if (!res.ok) throw new Error(res.statusText);
+      return res.text();
+    })
+    .then((svg) => {
+      iconSpriteContainer.innerHTML = svg;
+    })
+    .catch((err) => console.error('Failed to load icons', err));
 }
 
 async function uploadFile(item) {
@@ -491,6 +519,17 @@ function renderHistory() {
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'history-entry';
+
+    if (entry.preview_image) {
+      const thumb = document.createElement('img');
+      thumb.className = 'history-thumb';
+      thumb.src = entry.preview_image;
+      thumb.alt = `${entry.filename || entry.id} プレビュー`;
+      button.appendChild(thumb);
+    }
+
+    const textWrap = document.createElement('div');
+    textWrap.className = 'history-text';
     const name = document.createElement('div');
     name.className = 'history-name';
     name.textContent = entry.filename || entry.id;
@@ -500,7 +539,8 @@ function renderHistory() {
     const preview = document.createElement('div');
     preview.className = 'history-preview';
     preview.textContent = entry.preview || '';
-    button.append(name, time, preview);
+    textWrap.append(name, time, preview);
+    button.appendChild(textWrap);
     button.addEventListener('click', () => selectHistory(entry.id));
 
     const deleteBtn = document.createElement('button');
@@ -570,3 +610,4 @@ setTab('markdown');
 pingServer();
 updateQueueStatus();
 fetchHistory();
+loadIcons();
