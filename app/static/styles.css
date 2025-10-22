@@ -207,6 +207,10 @@ textarea.output {
   gap: 12px;
 }
 
+.modal.hidden {
+  display: none;
+}
+
 .modal-content img {
   max-width: 85vw;
   max-height: 70vh;

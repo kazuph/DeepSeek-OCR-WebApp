@@ -53,6 +53,7 @@ function setStatus(message, isError = false) {
 }
 
 function clearResults() {
+  closeModal();
   plainText.value = '';
   markdownRaw.value = '';
   markdownRender.innerHTML = '';
