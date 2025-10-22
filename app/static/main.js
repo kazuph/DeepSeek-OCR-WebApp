@@ -117,15 +117,17 @@ function addImageControls(wrapper, url, filename, index) {
   const controls = document.createElement('div');
   controls.className = 'img-actions action-buttons';
   const copyBtn = document.createElement('button');
-  copyBtn.className = 'button secondary mini';
-  copyBtn.textContent = 'コピー';
+  copyBtn.className = 'icon-button mini';
+  copyBtn.title = 'コピー';
+  copyBtn.innerHTML = '<svg><use href="#icon-copy" /></svg>';
   copyBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     copyImageToClipboard(url).then(() => setStatus('画像をコピーしました。'));
   });
   const downloadBtn = document.createElement('button');
-  downloadBtn.className = 'button secondary mini';
-  downloadBtn.textContent = 'DL';
+  downloadBtn.className = 'icon-button mini';
+  downloadBtn.title = 'ダウンロード';
+  downloadBtn.innerHTML = '<svg><use href="#icon-download" /></svg>';
   downloadBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     const ext = inferExtensionFromDataUrl(url);
