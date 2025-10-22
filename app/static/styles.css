@@ -9,6 +9,95 @@ body {
   color: #f1f1f1;
 }
 
+.layout {
+  display: flex;
+  gap: 24px;
+  min-height: 100vh;
+}
+
+.main-content {
+  flex: 1 1 auto;
+}
+
+.history-panel {
+  width: 280px;
+  background: rgba(255, 255, 255, 0.03);
+  border-left: 1px solid rgba(255, 255, 255, 0.1);
+  padding: 20px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.history-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.history-list {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.history-item {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.history-entry {
+  flex: 1 1 auto;
+  text-align: left;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 10px;
+  color: inherit;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.history-item.active .history-entry {
+  border-color: #ff9800;
+  background: rgba(255, 152, 0, 0.18);
+}
+
+.history-name {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.history-time {
+  font-size: 12px;
+  opacity: 0.8;
+}
+
+.history-preview {
+  font-size: 12px;
+  opacity: 0.7;
+  max-height: 3.2em;
+  overflow: hidden;
+}
+
+.history-delete {
+  height: fit-content;
+}
+
+.history-empty {
+  font-size: 13px;
+  opacity: 0.7;
+}
+
+.img-actions {
+  justify-content: flex-start;
+}
+
 .container {
   max-width: 1100px;
   margin: 0 auto;
@@ -237,5 +326,20 @@ textarea.output {
   }
   .results .section.full-width {
     grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 1100px) {
+  .layout {
+    flex-direction: column;
+  }
+  .history-panel {
+    width: 100%;
+    border-left: none;
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+    max-height: 280px;
+  }
+  .history-list {
+    max-height: 220px;
   }
 }

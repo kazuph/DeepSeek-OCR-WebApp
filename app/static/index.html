@@ -9,61 +9,74 @@
     <script type="module" src="/static/main.js" defer></script>
   </head>
   <body>
-    <div class="container">
-      <header>
-        <h1>DeepSeek OCR Web</h1>
-        <div class="metadata" id="model-info">モデル初期化待機中…</div>
-      </header>
+    <div class="layout">
+      <div class="main-content">
+        <div class="container">
+          <header>
+            <h1>DeepSeek OCR Web</h1>
+            <div class="metadata" id="model-info">モデル初期化待機中…</div>
+          </header>
 
-      <section class="uploader" id="drop-zone">
-        <p>画像をドラッグ＆ドロップ、またはクリックして選択</p>
-        <p>クリップボードの画像を貼り付けても分析を開始します</p>
-        <label class="button">
-          ファイルを選択
-          <input type="file" id="file-input" accept="image/*,.pdf" multiple />
-        </label>
-      </section>
+          <section class="uploader" id="drop-zone">
+            <p>画像をドラッグ＆ドロップ、またはクリックして選択</p>
+            <p>クリップボードの画像を貼り付けても分析を開始します</p>
+            <label class="button">
+              ファイルを選択
+              <input type="file" id="file-input" accept="image/*,.pdf" multiple />
+            </label>
+          </section>
 
-      <div class="status" id="status"></div>
-      <div class="queue" id="queue-status"></div>
+          <div class="status" id="status"></div>
+          <div class="queue" id="queue-status"></div>
 
-      <div class="results">
-        <section class="section full-width">
-          <h2>抽出テキスト</h2>
-          <div class="tab-buttons">
-            <button data-mode="plain" class="active" id="tab-plain">プレーン</button>
-            <button data-mode="markdown" id="tab-markdown">マークダウン</button>
-          </div>
-          <div class="action-buttons">
-            <button class="button secondary" id="copy-text">コピー</button>
-            <button class="button secondary" id="download-text">ダウンロード</button>
-          </div>
-          <textarea class="output" id="plain-text" readonly></textarea>
-          <div id="markdown-panel" class="hidden">
-            <textarea class="output" id="markdown-raw" readonly></textarea>
-            <div id="markdown-render"></div>
-          </div>
-          <div class="metadata" id="metadata-panel"></div>
-        </section>
+          <div class="results">
+            <section class="section full-width">
+              <h2>抽出テキスト</h2>
+              <div class="tab-buttons">
+                <button data-mode="plain" id="tab-plain">プレーン</button>
+                <button data-mode="markdown" class="active" id="tab-markdown">マークダウン</button>
+              </div>
+              <div class="action-buttons">
+                <button class="button secondary" id="copy-text">コピー</button>
+                <button class="button secondary" id="download-text">ダウンロード</button>
+              </div>
+              <textarea class="output" id="plain-text" readonly></textarea>
+              <div id="markdown-panel" class="hidden">
+                <textarea class="output" id="markdown-raw" readonly></textarea>
+                <div id="markdown-render"></div>
+              </div>
+              <div class="metadata" id="metadata-panel"></div>
+            </section>
 
-        <section class="section">
-          <h2>切り出し画像</h2>
-          <div class="action-buttons" id="crop-actions" hidden>
-            <button class="button secondary" id="copy-all-crops">すべてコピー</button>
-            <button class="button secondary" id="download-all-crops">すべてDL</button>
-          </div>
-          <div class="crops-grid" id="crops-grid"></div>
-        </section>
+            <section class="section">
+              <h2>切り出し画像</h2>
+              <div class="action-buttons" id="crop-actions" hidden>
+                <button class="button secondary" id="copy-all-crops">すべてコピー</button>
+                <button class="button secondary" id="download-all-crops">すべてDL</button>
+              </div>
+              <div class="crops-grid" id="crops-grid"></div>
+            </section>
 
-        <section class="section">
-          <h2>バウンディング画像</h2>
-          <div class="action-buttons" id="bounding-actions" hidden>
-            <button class="button secondary" id="copy-bounding">コピー</button>
-            <button class="button secondary" id="download-bounding">ダウンロード</button>
+            <section class="section">
+              <h2>バウンディング画像</h2>
+              <div class="action-buttons" id="bounding-actions" hidden>
+                <button class="button secondary" id="copy-bounding">コピー</button>
+                <button class="button secondary" id="download-bounding">ダウンロード</button>
+              </div>
+              <img id="bounding-image" class="bounding-image" alt="Bounding boxes" />
+            </section>
           </div>
-          <img id="bounding-image" class="bounding-image" alt="Bounding boxes" />
-        </section>
+        </div>
       </div>
+      <aside class="history-panel">
+        <div class="history-header">
+          <h2>履歴</h2>
+          <button class="button secondary mini" id="refresh-history">更新</button>
+        </div>
+        <div class="history-list" id="history-list">
+          <p class="history-empty">履歴はまだありません。</p>
+        </div>
+      </aside>
     </div>
 
     <div id="modal" class="modal hidden">

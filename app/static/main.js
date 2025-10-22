@@ -25,23 +25,24 @@ const modalImage = document.getElementById('modal-image');
 const modalClose = document.getElementById('modal-close');
 const modalCopyBtn = document.getElementById('modal-copy');
 const modalDownloadBtn = document.getElementById('modal-download');
+const historyListEl = document.getElementById('history-list');
+const refreshHistoryBtn = document.getElementById('refresh-history');
 
-let currentTextMode = 'plain';
+let currentTextMode = 'markdown';
 let processing = false;
 const queue = [];
 let currentItem = null;
 let lastResult = null;
 let modalContext = null;
+let historyEntries = [];
+let activeHistoryId = null;
 
 async function pingServer() {
   try {
     const res = await fetch('/api/ping');
-    if (res.ok) {
-      const data = await res.json();
-      infoEl.textContent = `サーバー状態: ${data.status}`;
-    } else {
-      infoEl.textContent = 'サーバーに接続できません';
-    }
+    if (!res.ok) throw new Error(res.statusText);
+    const data = await res.json();
+    infoEl.textContent = `サーバー状態: ${data.status}`;
   } catch (error) {
     infoEl.textContent = 'サーバーに接続できません';
   }
@@ -50,6 +51,15 @@ async function pingServer() {
 function setStatus(message, isError = false) {
   statusEl.textContent = message;
   statusEl.style.color = isError ? '#ff6b6b' : '#cfd8dc';
+}
+
+function formatDate(value) {
+  if (!value) return '-';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return date.toLocaleString();
 }
 
 function clearResults() {
@@ -73,31 +83,6 @@ function updateQueueStatus() {
     queueStatus.textContent = `待機中: ${queue.length} 件`;
   } else {
     queueStatus.textContent = '';
-  }
-}
-
-async function uploadFile(item) {
-  setStatus(`${item.name} を解析中…`);
-  const formData = new FormData();
-  formData.append('file', item.file);
-
-  try {
-    const response = await fetch('/api/ocr', {
-      method: 'POST',
-      body: formData,
-    });
-
-    if (!response.ok) {
-      const detail = await response.json().catch(() => ({}));
-      throw new Error(detail.detail || response.statusText);
-    }
-
-    const data = await response.json();
-    displayResult(data, item.name);
-    setStatus(`${item.name} の解析が完了しました。`);
-  } catch (error) {
-    console.error(error);
-    setStatus(`${item.name} の解析に失敗しました: ${error.message}`, true);
   }
 }
 
@@ -134,8 +119,10 @@ function addImageControls(wrapper, url, filename, index) {
   wrapper.appendChild(controls);
 }
 
-function displayResult(data, filename) {
-  lastResult = { data, filename };
+function displayResult(data, filename, historyId = null, createdAt = null) {
+  const firstDisplay = !lastResult;
+  lastResult = { data, filename, historyId, createdAt };
+
   plainText.value = data.text_plain || '';
   const markdownText = data.text_markdown || '';
   markdownRaw.value = markdownText;
@@ -171,9 +158,14 @@ function displayResult(data, filename) {
     boundingActions.hidden = true;
   }
 
-  const meta = data.metadata || {};
   const cropCount = Array.isArray(data.crops) ? data.crops.length : 0;
-  metadataPanel.textContent = `ファイル: ${meta.input || filename} / クロップ数: ${cropCount}`;
+  const createdText = formatDate(createdAt || data.created_at);
+  const inputName = data.metadata?.input || filename;
+  metadataPanel.textContent = `ファイル: ${inputName} / クロップ数: ${cropCount} / 作成: ${createdText}`;
+
+  if (firstDisplay) {
+    setTab('markdown');
+  }
 }
 
 function handleFiles(files) {
@@ -371,7 +363,166 @@ function closeModal() {
   modalContext = null;
 }
 
+async function uploadFile(item) {
+  setStatus(`${item.name} を解析中…`);
+  const formData = new FormData();
+  formData.append('file', item.file);
+
+  try {
+    const response = await fetch('/api/ocr', {
+      method: 'POST',
+      body: formData,
+    });
+
+    if (!response.ok) {
+      const detail = await response.json().catch(() => ({}));
+      throw new Error(detail.detail || response.statusText);
+    }
+
+    const data = await response.json();
+    displayResult(data, item.name, data.history_id, data.created_at);
+    if (data.history_id) {
+      activeHistoryId = data.history_id;
+    }
+    await fetchHistory(false);
+    setStatus(`${item.name} の解析が完了しました。`);
+  } catch (error) {
+    console.error(error);
+    setStatus(`${item.name} の解析に失敗しました: ${error.message}`, true);
+  }
+}
+
+async function fetchHistory(autoSelect = true) {
+  try {
+    const res = await fetch('/api/history');
+    if (!res.ok) throw new Error(res.statusText);
+    const data = await res.json();
+    if (!Array.isArray(data)) {
+      historyEntries = [];
+    } else {
+      historyEntries = data;
+    }
+
+    const hasActive = activeHistoryId && historyEntries.some((entry) => entry.id === activeHistoryId);
+    if (!hasActive && !historyEntries.length) {
+      activeHistoryId = null;
+      clearResults();
+    }
+
+    renderHistory();
+
+    if (!historyEntries.length) {
+      return;
+    }
+
+    if (autoSelect && (!hasActive || !activeHistoryId)) {
+      await selectHistory(historyEntries[0].id);
+    } else if (!hasActive && historyEntries.length) {
+      activeHistoryId = historyEntries[0].id;
+      renderHistory();
+    } else {
+      renderHistory();
+    }
+  } catch (error) {
+    console.error('Failed to load history', error);
+  }
+}
+
+function renderHistory() {
+  historyListEl.innerHTML = '';
+  if (!historyEntries.length) {
+    const empty = document.createElement('p');
+    empty.className = 'history-empty';
+    empty.textContent = '履歴はまだありません。';
+    historyListEl.appendChild(empty);
+    return;
+  }
+
+  historyEntries.forEach((entry) => {
+    const item = document.createElement('div');
+    item.className = 'history-item';
+    if (entry.id === activeHistoryId) {
+      item.classList.add('active');
+    }
+
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'history-entry';
+    const name = document.createElement('div');
+    name.className = 'history-name';
+    name.textContent = entry.filename || entry.id;
+    const time = document.createElement('div');
+    time.className = 'history-time';
+    time.textContent = formatDate(entry.created_at);
+    const preview = document.createElement('div');
+    preview.className = 'history-preview';
+    preview.textContent = entry.preview || '';
+    button.append(name, time, preview);
+    button.addEventListener('click', () => selectHistory(entry.id));
+
+    const deleteBtn = document.createElement('button');
+    deleteBtn.type = 'button';
+    deleteBtn.className = 'button secondary mini history-delete';
+    deleteBtn.textContent = '削除';
+    deleteBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      deleteHistoryEntry(entry.id, entry.filename || entry.id);
+    });
+
+    item.append(button, deleteBtn);
+    historyListEl.appendChild(item);
+  });
+}
+
+async function selectHistory(id, forceReload = true) {
+  if (!id) return;
+  if (activeHistoryId !== id) {
+    activeHistoryId = id;
+    renderHistory();
+  }
+  if (forceReload) {
+    await loadHistoryEntry(id);
+  }
+}
+
+async function loadHistoryEntry(id) {
+  try {
+    const res = await fetch(`/api/history/${id}`);
+    if (!res.ok) throw new Error(res.statusText);
+    const data = await res.json();
+    displayResult(data, data.filename || id, data.history_id || id, data.created_at);
+    setStatus(`${data.filename || id} を読み込みました。`);
+  } catch (error) {
+    console.error('failed to load history entry', error);
+    setStatus('履歴の読み込みに失敗しました。', true);
+  }
+}
+
+async function deleteHistoryEntry(id, filename) {
+  if (!confirm(`${filename} を削除しますか？`)) {
+    return;
+  }
+  try {
+    const res = await fetch(`/api/history/${id}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error(res.statusText);
+    if (activeHistoryId === id) {
+      activeHistoryId = null;
+      clearResults();
+    }
+    await fetchHistory();
+    setStatus(`${filename} を削除しました。`);
+  } catch (error) {
+    console.error('failed to delete history entry', error);
+    setStatus('履歴の削除に失敗しました。', true);
+  }
+}
+
+refreshHistoryBtn.addEventListener('click', () => {
+  fetchHistory();
+});
+
 clearResults();
-setTab('plain');
+setTab('markdown');
 pingServer();
 updateQueueStatus();
+fetchHistory();

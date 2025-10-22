@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import List
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.ocr_engine import run_ocr_bytes
+from app.ocr_engine import (
+    delete_history_entry,
+    list_history_entries,
+    load_history_entry,
+    run_ocr_bytes,
+)
 
 app = FastAPI(title="DeepSeek OCR Web")
 
@@ -45,3 +51,25 @@ async def ocr_endpoint(file: UploadFile = File(...)) -> dict[str, object]:
         raise HTTPException(status_code=500, detail=f"OCR failed: {exc}") from exc
 
     return result
+
+
+@app.get("/api/history")
+async def history_list() -> List[dict[str, object]]:
+    return list_history_entries()
+
+
+@app.get("/api/history/{entry_id}")
+async def history_detail(entry_id: str) -> dict[str, object]:
+    try:
+        return load_history_entry(entry_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="History entry not found") from exc
+
+
+@app.delete("/api/history/{entry_id}")
+async def history_delete(entry_id: str) -> dict[str, str]:
+    try:
+        delete_history_entry(entry_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="History entry not found") from exc
+    return {"status": "deleted"}

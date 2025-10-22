@@ -6,8 +6,11 @@ import base64
 import json
 import mimetypes
 import os
+import shutil
 import tempfile
+import uuid
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Iterable, List, Sequence
 
@@ -77,6 +80,10 @@ class OCRDocumentResult:
     text_path: Path
     text_plain: str
     text_markdown: str
+
+
+WEB_HISTORY_DIR = Path(os.getenv("OCR_HISTORY_DIR", "/workspace/web_history"))
+WEB_HISTORY_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -315,7 +322,12 @@ def run_ocr_bytes(
                 if path.is_file():
                     crop_urls.append(encode_file_to_data_url(path))
 
+        metadata = _persist_history_entry(doc, safe_name, image_bytes)
+
         return {
+            "history_id": metadata["id"],
+            "created_at": metadata["created_at"],
+            "filename": metadata["filename"],
             "text_plain": doc.text_plain,
             "text_markdown": doc.text_markdown,
             "bounding_image": bounding_image,
@@ -326,3 +338,137 @@ def run_ocr_bytes(
                 "text_file": doc.text_path.name,
             },
         }
+
+
+def _persist_history_entry(
+    doc: OCRDocumentResult,
+    original_filename: str,
+    original_bytes: bytes,
+) -> dict[str, object]:
+    entry_id = f"{datetime.utcnow().strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}"
+    entry_dir = WEB_HISTORY_DIR / entry_id
+    entry_dir.mkdir(parents=True, exist_ok=True)
+
+    artifacts_target = entry_dir / "artifacts"
+    shutil.copytree(doc.artifact_dir, artifacts_target)
+
+    texts_target = entry_dir / "texts"
+    texts_target.mkdir(parents=True, exist_ok=True)
+    shutil.copy(doc.text_path, texts_target / doc.text_path.name)
+
+    input_target_dir = entry_dir / "input"
+    input_target_dir.mkdir(parents=True, exist_ok=True)
+    if doc.image_path.exists():
+        shutil.copy(doc.image_path, input_target_dir / doc.image_path.name)
+    else:
+        (input_target_dir / original_filename).write_bytes(original_bytes)
+
+    crop_files: List[str] = []
+    images_dir = artifacts_target / "images"
+    if images_dir.exists():
+        crop_files = sorted([p.name for p in images_dir.iterdir() if p.is_file()])
+
+    bounding_name = None
+    possible = ["result_with_boxes.jpg", "result_with_boxes.png"]
+    for candidate in possible:
+        candidate_path = artifacts_target / candidate
+        if candidate_path.exists():
+            bounding_name = candidate_path.name
+            break
+
+    created_at = datetime.utcnow().isoformat() + "Z"
+    preview_source = (doc.text_markdown or doc.text_plain or "").replace("\n", " ").strip()
+    preview = preview_source[:160]
+
+    metadata = {
+        "id": entry_id,
+        "filename": original_filename,
+        "created_at": created_at,
+        "text_plain": doc.text_plain,
+        "text_markdown": doc.text_markdown,
+        "crops": crop_files,
+        "bounding_image": bounding_name,
+        "preview": preview,
+    }
+
+    (entry_dir / "metadata.json").write_text(
+        json.dumps(metadata, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    return metadata
+
+
+def list_history_entries(limit: int | None = None) -> List[dict[str, object]]:
+    entries: List[dict[str, object]] = []
+    if not WEB_HISTORY_DIR.exists():
+        return entries
+
+    for entry_dir in WEB_HISTORY_DIR.iterdir():
+        if not entry_dir.is_dir():
+            continue
+        meta_file = entry_dir / "metadata.json"
+        if not meta_file.exists():
+            continue
+        try:
+            metadata = json.loads(meta_file.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
+
+        entry = {
+            "id": metadata.get("id", entry_dir.name),
+            "filename": metadata.get("filename", entry_dir.name),
+            "created_at": metadata.get("created_at"),
+            "preview": metadata.get("preview", ""),
+        }
+        entries.append(entry)
+
+    entries.sort(key=lambda item: item.get("created_at") or "", reverse=True)
+    if limit is not None:
+        entries = entries[:limit]
+    return entries
+
+
+def load_history_entry(entry_id: str) -> dict[str, object]:
+    entry_dir = WEB_HISTORY_DIR / entry_id
+    meta_file = entry_dir / "metadata.json"
+    if not meta_file.exists():
+        raise FileNotFoundError(entry_id)
+
+    metadata = json.loads(meta_file.read_text(encoding="utf-8"))
+    artifacts_dir = entry_dir / "artifacts"
+
+    crops: List[str] = []
+    images_dir = artifacts_dir / "images"
+    if images_dir.exists():
+        for name in metadata.get("crops", []):
+            path = images_dir / name
+            if path.exists():
+                crops.append(encode_file_to_data_url(path))
+
+    bounding_image = None
+    bounding_name = metadata.get("bounding_image")
+    if bounding_name:
+        bounding_path = artifacts_dir / bounding_name
+        if bounding_path.exists():
+            bounding_image = encode_file_to_data_url(bounding_path)
+
+    return {
+        "history_id": metadata.get("id", entry_id),
+        "filename": metadata.get("filename", entry_id),
+        "created_at": metadata.get("created_at"),
+        "text_plain": metadata.get("text_plain", ""),
+        "text_markdown": metadata.get("text_markdown", ""),
+        "bounding_image": bounding_image,
+        "crops": crops,
+        "metadata": {
+            "input": metadata.get("filename", entry_id),
+        },
+    }
+
+
+def delete_history_entry(entry_id: str) -> None:
+    entry_dir = WEB_HISTORY_DIR / entry_id
+    if not entry_dir.exists():
+        raise FileNotFoundError(entry_id)
+    shutil.rmtree(entry_dir)
