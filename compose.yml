@@ -22,7 +22,17 @@ services:
       - ./.cache/huggingface:/workspace/.cache/huggingface
     ports:
       - "8080:8080"
-    command: ["bash", "-lc", "uvicorn app.main:app --host 0.0.0.0 --port 8080"]
+    command: [
+      "uv",
+      "run",
+      "--with", "fastapi",
+      "--with", "uvicorn[standard]",
+      "--with", "python-multipart",
+      "uvicorn",
+      "app.main:app",
+      "--host", "0.0.0.0",
+      "--port", "8080"
+    ]
     deploy:
       resources:
         reservations:

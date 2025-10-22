@@ -8,6 +8,3 @@ addict
 Pillow
 numpy
 matplotlib
-fastapi
-uvicorn[standard]
-python-multipart

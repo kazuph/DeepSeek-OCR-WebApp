@@ -33,15 +33,28 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN pip install --upgrade pip setuptools wheel
 
-COPY requirements.txt /tmp/requirements.txt
-
 RUN pip install --extra-index-url https://download.pytorch.org/whl/cu124 \
         torch==2.6.0 \
         torchvision==0.21.0 \
-        torchaudio==2.6.0 \
-    && pip install --no-cache-dir -r /tmp/requirements.txt \
-    && pip install --no-cache-dir flash-attn==2.7.3 --no-build-isolation \
-    && pip install --no-cache-dir tqdm accelerate
+        torchaudio==2.6.0
+
+RUN pip install --no-cache-dir \
+        transformers==4.46.3 \
+        tokenizers==0.20.3 \
+        PyMuPDF \
+        img2pdf \
+        einops \
+        easydict \
+        addict \
+        Pillow \
+        numpy \
+        tqdm \
+        accelerate && \
+    pip install --no-cache-dir flash-attn==2.7.3 --no-build-isolation
+
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
+    install -m 0755 /root/.local/bin/uv /usr/local/bin/uv && \
+    install -m 0755 /root/.local/bin/uvx /usr/local/bin/uvx
 
 RUN groupadd --gid ${USER_GID} ${USER_NAME} \
     && useradd --uid ${USER_UID} --gid ${USER_GID} --create-home ${USER_NAME}
