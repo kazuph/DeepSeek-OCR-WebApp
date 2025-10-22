@@ -2,6 +2,7 @@ const statusEl = document.getElementById('status');
 const infoEl = document.getElementById('model-info');
 const dropZone = document.getElementById('drop-zone');
 const fileInput = document.getElementById('file-input');
+const queueStatus = document.getElementById('queue-status');
 const plainText = document.getElementById('plain-text');
 const markdownPanel = document.getElementById('markdown-panel');
 const markdownRaw = document.getElementById('markdown-raw');
@@ -11,6 +12,26 @@ const boundingImage = document.getElementById('bounding-image');
 const metadataPanel = document.getElementById('metadata-panel');
 const tabPlain = document.getElementById('tab-plain');
 const tabMarkdown = document.getElementById('tab-markdown');
+const copyTextBtn = document.getElementById('copy-text');
+const downloadTextBtn = document.getElementById('download-text');
+const cropActions = document.getElementById('crop-actions');
+const copyAllCropsBtn = document.getElementById('copy-all-crops');
+const downloadAllCropsBtn = document.getElementById('download-all-crops');
+const boundingActions = document.getElementById('bounding-actions');
+const copyBoundingBtn = document.getElementById('copy-bounding');
+const downloadBoundingBtn = document.getElementById('download-bounding');
+const modal = document.getElementById('modal');
+const modalImage = document.getElementById('modal-image');
+const modalClose = document.getElementById('modal-close');
+const modalCopyBtn = document.getElementById('modal-copy');
+const modalDownloadBtn = document.getElementById('modal-download');
+
+let currentTextMode = 'plain';
+let processing = false;
+const queue = [];
+let currentItem = null;
+let lastResult = null;
+let modalContext = null;
 
 async function pingServer() {
   try {
@@ -39,12 +60,25 @@ function clearResults() {
   boundingImage.src = '';
   boundingImage.alt = '';
   metadataPanel.textContent = '';
+  boundingActions.hidden = true;
+  cropActions.hidden = true;
+  lastResult = null;
 }
 
-async function uploadFile(file) {
-  setStatus('解析を開始します…');
+function updateQueueStatus() {
+  if (processing) {
+    queueStatus.textContent = `処理中: ${currentItem?.name || '---'} / 残り ${queue.length} 件`;
+  } else if (queue.length > 0) {
+    queueStatus.textContent = `待機中: ${queue.length} 件`;
+  } else {
+    queueStatus.textContent = '';
+  }
+}
+
+async function uploadFile(item) {
+  setStatus(`${item.name} を解析中…`);
   const formData = new FormData();
-  formData.append('file', file);
+  formData.append('file', item.file);
 
   try {
     const response = await fetch('/api/ocr', {
@@ -58,15 +92,49 @@ async function uploadFile(file) {
     }
 
     const data = await response.json();
-    displayResult(data, file.name);
-    setStatus('解析が完了しました。');
+    displayResult(data, item.name);
+    setStatus(`${item.name} の解析が完了しました。`);
   } catch (error) {
     console.error(error);
-    setStatus(`エラーが発生しました: ${error.message}`, true);
+    setStatus(`${item.name} の解析に失敗しました: ${error.message}`, true);
   }
 }
 
+function inferExtensionFromDataUrl(dataUrl, fallback = 'png') {
+  const match = dataUrl.match(/^data:(.+?);/);
+  if (!match) return fallback;
+  const mime = match[1];
+  if (mime.includes('jpeg')) return 'jpg';
+  if (mime.includes('png')) return 'png';
+  if (mime.includes('gif')) return 'gif';
+  if (mime.includes('webp')) return 'webp';
+  return fallback;
+}
+
+function addImageControls(wrapper, url, filename, index) {
+  const controls = document.createElement('div');
+  controls.className = 'img-actions action-buttons';
+  const copyBtn = document.createElement('button');
+  copyBtn.className = 'button secondary mini';
+  copyBtn.textContent = 'コピー';
+  copyBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    copyImageToClipboard(url).then(() => setStatus('画像をコピーしました。'));
+  });
+  const downloadBtn = document.createElement('button');
+  downloadBtn.className = 'button secondary mini';
+  downloadBtn.textContent = 'DL';
+  downloadBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const ext = inferExtensionFromDataUrl(url);
+    downloadDataUrl(url, `${filename}-crop-${index + 1}.${ext}`);
+  });
+  controls.append(copyBtn, downloadBtn);
+  wrapper.appendChild(controls);
+}
+
 function displayResult(data, filename) {
+  lastResult = { data, filename };
   plainText.value = data.text_plain || '';
   const markdownText = data.text_markdown || '';
   markdownRaw.value = markdownText;
@@ -76,22 +144,30 @@ function displayResult(data, filename) {
     cropsGrid.innerHTML = '';
     data.crops.forEach((url, index) => {
       const wrapper = document.createElement('div');
+      wrapper.className = 'crop-item';
       const img = document.createElement('img');
       img.src = url;
       img.alt = `Crop ${index + 1}`;
+      img.dataset.index = index;
+      img.addEventListener('click', () => openModal({ type: 'crop', url, index }));
       wrapper.appendChild(img);
+      addImageControls(wrapper, url, filename, index);
       cropsGrid.appendChild(wrapper);
     });
+    cropActions.hidden = false;
   } else {
     cropsGrid.innerHTML = '<p>切り出し画像はありませんでした。</p>';
+    cropActions.hidden = true;
   }
 
   if (data.bounding_image) {
     boundingImage.src = data.bounding_image;
     boundingImage.alt = `${filename} のバウンディングボックス`;
+    boundingActions.hidden = false;
   } else {
     boundingImage.src = '';
     boundingImage.alt = 'バウンディング画像は生成されませんでした';
+    boundingActions.hidden = true;
   }
 
   const meta = data.metadata || {};
@@ -103,12 +179,37 @@ function handleFiles(files) {
   if (!files || files.length === 0) {
     return;
   }
-  clearResults();
-  uploadFile(files[0]);
+  Array.from(files).forEach((file) => {
+    queue.push({ file, name: file.name || `upload-${Date.now()}` });
+  });
+  updateQueueStatus();
+  processQueue();
+}
+
+async function processQueue() {
+  if (processing || queue.length === 0) {
+    return;
+  }
+  processing = true;
+  currentItem = queue.shift();
+  updateQueueStatus();
+
+  if (currentItem) {
+    await uploadFile(currentItem);
+  }
+
+  processing = false;
+  currentItem = null;
+  updateQueueStatus();
+
+  if (queue.length > 0) {
+    processQueue();
+  }
 }
 
 fileInput.addEventListener('change', (event) => {
   handleFiles(event.target.files);
+  fileInput.value = '';
 });
 
 dropZone.addEventListener('dragover', (event) => {
@@ -135,15 +236,16 @@ window.addEventListener('paste', (event) => {
     if (item.kind === 'file') {
       const file = item.getAsFile();
       if (file) {
-        clearResults();
-        uploadFile(file);
-        break;
+        queue.push({ file, name: file.name || `paste-${Date.now()}` });
       }
     }
   }
+  updateQueueStatus();
+  processQueue();
 });
 
 function setTab(mode) {
+  currentTextMode = mode;
   if (mode === 'plain') {
     tabPlain.classList.add('active');
     tabMarkdown.classList.remove('active');
@@ -160,6 +262,115 @@ function setTab(mode) {
 tabPlain.addEventListener('click', () => setTab('plain'));
 tabMarkdown.addEventListener('click', () => setTab('markdown'));
 
+copyTextBtn.addEventListener('click', () => {
+  const text = currentTextMode === 'plain' ? plainText.value : markdownRaw.value;
+  if (text) {
+    navigator.clipboard.writeText(text).then(() => setStatus('テキストをコピーしました。'));
+  }
+});
+
+downloadTextBtn.addEventListener('click', () => {
+  const isPlain = currentTextMode === 'plain';
+  const text = isPlain ? plainText.value : markdownRaw.value;
+  if (!text) {
+    return;
+  }
+  const ext = isPlain ? 'txt' : 'md';
+  const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `ocr.${ext}`;
+  a.click();
+  URL.revokeObjectURL(url);
+});
+
+copyAllCropsBtn.addEventListener('click', async () => {
+  if (!lastResult?.data?.crops?.length) return;
+  await copyImageToClipboard(lastResult.data.crops[0]);
+  setStatus('最初の切り出し画像をコピーしました。');
+});
+
+downloadAllCropsBtn.addEventListener('click', () => {
+  if (!lastResult?.data?.crops?.length) return;
+  lastResult.data.crops.forEach((url, index) => {
+    const ext = inferExtensionFromDataUrl(url);
+    downloadDataUrl(url, `${lastResult.filename}-crop-${index + 1}.${ext}`);
+  });
+});
+
+copyBoundingBtn.addEventListener('click', async () => {
+  if (!lastResult?.data?.bounding_image) return;
+  await copyImageToClipboard(lastResult.data.bounding_image);
+  setStatus('バウンディング画像をコピーしました。');
+});
+
+downloadBoundingBtn.addEventListener('click', () => {
+  if (!lastResult?.data?.bounding_image) return;
+  const ext = inferExtensionFromDataUrl(lastResult.data.bounding_image, 'jpg');
+  downloadDataUrl(lastResult.data.bounding_image, `${lastResult.filename}-bounding.${ext}`);
+});
+
+boundingImage.addEventListener('click', () => {
+  if (!lastResult?.data?.bounding_image) return;
+  openModal({ type: 'bounding', url: lastResult.data.bounding_image });
+});
+
+modalClose.addEventListener('click', closeModal);
+modal.addEventListener('click', (e) => {
+  if (e.target === modal) closeModal();
+});
+
+modalCopyBtn.addEventListener('click', async () => {
+  if (!modalContext) return;
+  await copyImageToClipboard(modalContext.url);
+  setStatus('画像をコピーしました。');
+});
+
+modalDownloadBtn.addEventListener('click', () => {
+  if (!modalContext) return;
+  const ext = inferExtensionFromDataUrl(modalContext.url);
+  const suffix = modalContext.type === 'crop' ? `crop-${modalContext.index + 1}` : 'bounding';
+  const name = `${lastResult?.filename || 'ocr'}-${suffix}.${ext}`;
+  downloadDataUrl(modalContext.url, name);
+});
+
+function downloadDataUrl(dataUrl, filename) {
+  const a = document.createElement('a');
+  a.href = dataUrl;
+  a.download = filename || 'ocr-output';
+  a.click();
+}
+
+async function copyImageToClipboard(dataUrl) {
+  if (!navigator.clipboard || !window.ClipboardItem) {
+    setStatus('このブラウザは画像コピーに対応していません。', true);
+    return;
+  }
+  try {
+    const response = await fetch(dataUrl);
+    const blob = await response.blob();
+    const item = new ClipboardItem({ [blob.type]: blob });
+    await navigator.clipboard.write([item]);
+  } catch (error) {
+    console.error(error);
+    setStatus('画像をクリップボードにコピーできませんでした。', true);
+  }
+}
+
+function openModal(ctx) {
+  modalContext = ctx;
+  modalImage.src = ctx.url;
+  modal.classList.remove('hidden');
+}
+
+function closeModal() {
+  modal.classList.add('hidden');
+  modalImage.src = '';
+  modalContext = null;
+}
+
 clearResults();
 setTab('plain');
 pingServer();
+updateQueueStatus();

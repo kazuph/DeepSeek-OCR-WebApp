@@ -63,10 +63,21 @@ h1 {
   background: #607d8b;
 }
 
+.button.secondary.mini {
+  padding: 6px 10px;
+  font-size: 12px;
+}
+
 .status {
   margin-bottom: 24px;
   min-height: 24px;
   font-size: 15px;
+}
+
+.queue {
+  margin-bottom: 16px;
+  font-size: 14px;
+  opacity: 0.85;
 }
 
 .results {
@@ -127,6 +138,12 @@ textarea.output {
   color: #111;
 }
 
+.action-buttons {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
 .crops-grid {
   display: grid;
   gap: 12px;
@@ -137,12 +154,25 @@ textarea.output {
   width: 100%;
   border-radius: 8px;
   border: 1px solid rgba(255, 255, 255, 0.1);
+  cursor: zoom-in;
+}
+
+.crop-item {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.img-actions {
+  justify-content: flex-start;
 }
 
 .bounding-image {
   max-width: 100%;
   border-radius: 12px;
   border: 1px solid rgba(255, 255, 255, 0.15);
+  cursor: zoom-in;
 }
 
 .metadata {
@@ -152,6 +182,49 @@ textarea.output {
 
 .hidden {
   display: none;
+}
+
+.modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.8);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 999;
+}
+
+.modal-content {
+  position: relative;
+  max-width: 90vw;
+  max-height: 90vh;
+  background: #1c1c1c;
+  padding: 16px;
+  border-radius: 12px;
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.modal-content img {
+  max-width: 85vw;
+  max-height: 70vh;
+  border-radius: 8px;
+}
+
+.modal-close {
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  cursor: pointer;
+  font-size: 24px;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 12px;
+  justify-content: flex-end;
 }
 
 @media (min-width: 900px) {
