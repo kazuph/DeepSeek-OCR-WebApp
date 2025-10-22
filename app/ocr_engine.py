@@ -312,17 +312,8 @@ def run_ocr_bytes(
             raise RuntimeError("OCR produced no output")
 
         doc = results[0]
-        bounding_image_path = doc.artifact_dir / "result_with_boxes.jpg"
-        bounding_image = encode_file_to_data_url(bounding_image_path) if bounding_image_path.exists() else None
-
-        images_dir = doc.artifact_dir / "images"
-        crop_urls: List[str] = []
-        if images_dir.exists():
-            for path in sorted(images_dir.iterdir()):
-                if path.is_file():
-                    crop_urls.append(encode_file_to_data_url(path))
-
         metadata = _persist_history_entry(doc, safe_name, image_bytes)
+        bounding_url, crops, preview_url = _build_image_urls(metadata["id"], metadata)
 
         return {
             "history_id": metadata["id"],
@@ -330,12 +321,11 @@ def run_ocr_bytes(
             "filename": metadata["filename"],
             "text_plain": doc.text_plain,
             "text_markdown": doc.text_markdown,
-            "bounding_image": bounding_image,
-            "crops": crop_urls,
+            "bounding_image_url": bounding_url,
+            "crops": crops,
+            "preview_image_url": preview_url,
             "metadata": {
                 "input": doc.input_path.name,
-                "artifact_dir": doc.artifact_dir.name,
-                "text_file": doc.text_path.name,
             },
         }
 
@@ -399,6 +389,33 @@ def _persist_history_entry(
     return metadata
 
 
+def _build_image_urls(entry_id: str, metadata: dict[str, object]) -> tuple[str | None, List[dict[str, str]], str | None]:
+    base_url = f"/api/history/{entry_id}"
+
+    bounding_url = None
+    bounding_name = metadata.get("bounding_image")
+    if bounding_name:
+        bounding_url = f"{base_url}/image/bounding"
+
+    crops: List[dict[str, str]] = []
+    for name in metadata.get("crops", []):
+        crops.append({"name": name, "url": f"{base_url}/image/crop/{name}"})
+
+    preview_url = bounding_url or (crops[0]["url"] if crops else None)
+    return bounding_url, crops, preview_url
+
+
+def _load_entry_metadata(entry_id: str) -> tuple[dict[str, object], Path]:
+    entry_dir = WEB_HISTORY_DIR / entry_id
+    if not entry_dir.exists():
+        raise FileNotFoundError(entry_id)
+    meta_file = entry_dir / "metadata.json"
+    if not meta_file.exists():
+        raise FileNotFoundError(entry_id)
+    metadata = json.loads(meta_file.read_text(encoding="utf-8"))
+    return metadata, entry_dir
+
+
 def list_history_entries(limit: int | None = None) -> List[dict[str, object]]:
     entries: List[dict[str, object]] = []
     if not WEB_HISTORY_DIR.exists():
@@ -415,28 +432,15 @@ def list_history_entries(limit: int | None = None) -> List[dict[str, object]]:
         except json.JSONDecodeError:
             continue
 
-        artifacts_dir = entry_dir / "artifacts"
-        images_dir = artifacts_dir / "images"
-
-        preview_image = None
-        bounding_name = metadata.get("bounding_image")
-        if bounding_name:
-            bounding_path = artifacts_dir / bounding_name
-            if bounding_path.exists():
-                preview_image = encode_file_to_data_url(bounding_path)
-        if not preview_image:
-            crop_names = metadata.get("crops", [])
-            if crop_names and images_dir.exists():
-                first_crop = images_dir / crop_names[0]
-                if first_crop.exists():
-                    preview_image = encode_file_to_data_url(first_crop)
+        entry_id = metadata.get("id", entry_dir.name)
+        bounding_url, crops, preview_url = _build_image_urls(entry_id, metadata)
 
         entry = {
-            "id": metadata.get("id", entry_dir.name),
+            "id": entry_id,
             "filename": metadata.get("filename", entry_dir.name),
             "created_at": metadata.get("created_at"),
             "preview": metadata.get("preview", ""),
-            "preview_image": preview_image,
+            "preview_image_url": preview_url,
         }
         entries.append(entry)
 
@@ -447,28 +451,8 @@ def list_history_entries(limit: int | None = None) -> List[dict[str, object]]:
 
 
 def load_history_entry(entry_id: str) -> dict[str, object]:
-    entry_dir = WEB_HISTORY_DIR / entry_id
-    meta_file = entry_dir / "metadata.json"
-    if not meta_file.exists():
-        raise FileNotFoundError(entry_id)
-
-    metadata = json.loads(meta_file.read_text(encoding="utf-8"))
-    artifacts_dir = entry_dir / "artifacts"
-
-    crops: List[str] = []
-    images_dir = artifacts_dir / "images"
-    if images_dir.exists():
-        for name in metadata.get("crops", []):
-            path = images_dir / name
-            if path.exists():
-                crops.append(encode_file_to_data_url(path))
-
-    bounding_image = None
-    bounding_name = metadata.get("bounding_image")
-    if bounding_name:
-        bounding_path = artifacts_dir / bounding_name
-        if bounding_path.exists():
-            bounding_image = encode_file_to_data_url(bounding_path)
+    metadata, _ = _load_entry_metadata(entry_id)
+    bounding_url, crops, preview_url = _build_image_urls(entry_id, metadata)
 
     return {
         "history_id": metadata.get("id", entry_id),
@@ -476,8 +460,9 @@ def load_history_entry(entry_id: str) -> dict[str, object]:
         "created_at": metadata.get("created_at"),
         "text_plain": metadata.get("text_plain", ""),
         "text_markdown": metadata.get("text_markdown", ""),
-        "bounding_image": bounding_image,
+        "bounding_image_url": bounding_url,
         "crops": crops,
+        "preview_image_url": preview_url,
         "metadata": {
             "input": metadata.get("filename", entry_id),
         },

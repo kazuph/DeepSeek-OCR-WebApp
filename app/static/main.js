@@ -68,12 +68,32 @@ function transformMarkdown(markdown, crops) {
   if (!markdown || !Array.isArray(crops) || !crops.length) {
     return markdown;
   }
-  return markdown.replace(/!\[\]\(images\/(\d+)\.(?:jpe?g|png)\)/g, (match, index) => {
-    const idx = Number.parseInt(index, 10);
-    if (Number.isNaN(idx) || !crops[idx]) {
-      return match;
+
+  const replacements = new Map();
+  crops.forEach((crop, index) => {
+    if (!crop || !crop.url) return;
+    if (crop.name) {
+      replacements.set(crop.name, crop.url);
+      replacements.set(`images/${crop.name}`, crop.url);
     }
-    return `![](${crops[idx]})`;
+    replacements.set(`${index}`, crop.url);
+    replacements.set(`images/${index}`, crop.url);
+    replacements.set(`images/${index}.jpg`, crop.url);
+    replacements.set(`images/${index}.jpeg`, crop.url);
+    replacements.set(`images/${index}.png`, crop.url);
+  });
+
+  return markdown.replace(/!\[(.*?)\]\(([^)]+)\)/g, (match, alt, path) => {
+    const key = path.trim();
+    const direct = replacements.get(key);
+    if (direct) {
+      return `![${alt}](${direct})`;
+    }
+    const file = key.split('/').pop();
+    if (file && replacements.has(file)) {
+      return `![${alt}](${replacements.get(file)})`;
+    }
+    return match;
   });
 }
 
@@ -102,18 +122,28 @@ function updateQueueStatus() {
   renderQueue();
 }
 
-function inferExtensionFromDataUrl(dataUrl, fallback = 'png') {
-  const match = dataUrl.match(/^data:(.+?);/);
-  if (!match) return fallback;
-  const mime = match[1];
-  if (mime.includes('jpeg')) return 'jpg';
-  if (mime.includes('png')) return 'png';
-  if (mime.includes('gif')) return 'gif';
-  if (mime.includes('webp')) return 'webp';
-  return fallback;
+function inferExtensionFromDataUrl(source, fallback = 'png') {
+  if (!source) return fallback;
+  if (source.startsWith('data:')) {
+    const match = source.match(/^data:(.+?);/);
+    if (!match) return fallback;
+    const mime = match[1];
+    if (mime.includes('jpeg')) return 'jpg';
+    if (mime.includes('png')) return 'png';
+    if (mime.includes('gif')) return 'gif';
+    if (mime.includes('webp')) return 'webp';
+    return fallback;
+  }
+
+  const name = source.split('?')[0]?.split('#')[0];
+  const ext = name?.split('.').pop();
+  if (!ext) return fallback;
+  return ext;
 }
 
-function addImageControls(wrapper, url, filename, index) {
+function addImageControls(wrapper, crop, filename, index) {
+  if (!crop || !crop.url) return;
+  const { url, name } = crop;
   const controls = document.createElement('div');
   controls.className = 'img-actions action-buttons';
   const copyBtn = document.createElement('button');
@@ -131,7 +161,8 @@ function addImageControls(wrapper, url, filename, index) {
   downloadBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     const ext = inferExtensionFromDataUrl(url);
-    downloadDataUrl(url, `${filename}-crop-${index + 1}.${ext}`);
+    const label = name || `crop-${index + 1}`;
+    downloadDataUrl(url, `${filename}-${label}.${ext}`);
   });
   controls.append(copyBtn, downloadBtn);
   wrapper.appendChild(controls);
@@ -143,24 +174,25 @@ function displayResult(data, filename, historyId = null, createdAt = null) {
 
   plainText.value = data.text_plain || '';
   const markdownText = data.text_markdown || '';
-  const processedMarkdown = transformMarkdown(markdownText, data.crops || []);
+  const cropList = Array.isArray(data.crops) ? data.crops.filter((crop) => crop && crop.url) : [];
+  const processedMarkdown = transformMarkdown(markdownText, cropList);
   markdownRaw.value = markdownText;
   markdownRender.innerHTML = processedMarkdown
     ? window.marked.parse(processedMarkdown)
     : '<p>マークダウン出力はありません。</p>';
 
-  if (Array.isArray(data.crops) && data.crops.length > 0) {
+  if (cropList.length > 0) {
     cropsGrid.innerHTML = '';
-    data.crops.forEach((url, index) => {
+    cropList.forEach((crop, index) => {
       const wrapper = document.createElement('div');
       wrapper.className = 'crop-item';
       const img = document.createElement('img');
-      img.src = url;
+      img.src = crop.url;
       img.alt = `Crop ${index + 1}`;
       img.dataset.index = index;
-      img.addEventListener('click', () => openModal({ type: 'crop', url, index }));
+      img.addEventListener('click', () => openModal({ type: 'crop', url: crop.url, index }));
       wrapper.appendChild(img);
-      addImageControls(wrapper, url, filename, index);
+      addImageControls(wrapper, crop, filename, index);
       cropsGrid.appendChild(wrapper);
     });
     cropActions.hidden = false;
@@ -169,8 +201,8 @@ function displayResult(data, filename, historyId = null, createdAt = null) {
     cropActions.hidden = true;
   }
 
-  if (data.bounding_image) {
-    boundingImage.src = data.bounding_image;
+  if (data.bounding_image_url) {
+    boundingImage.src = data.bounding_image_url;
     boundingImage.alt = `${filename} のバウンディングボックス`;
     boundingActions.hidden = false;
   } else {
@@ -179,7 +211,7 @@ function displayResult(data, filename, historyId = null, createdAt = null) {
     boundingActions.hidden = true;
   }
 
-  const cropCount = Array.isArray(data.crops) ? data.crops.length : 0;
+  const cropCount = cropList.length;
   const createdText = formatDate(createdAt || data.created_at);
   const inputName = data.metadata?.input || filename;
   metadataPanel.textContent = `ファイル: ${inputName} / クロップ数: ${cropCount} / 作成: ${createdText}`;
@@ -309,33 +341,37 @@ downloadTextBtn.addEventListener('click', () => {
 
 copyAllCropsBtn.addEventListener('click', async () => {
   if (!lastResult?.data?.crops?.length) return;
-  await copyImageToClipboard(lastResult.data.crops[0]);
+  const first = lastResult.data.crops[0];
+  if (!first?.url) return;
+  await copyImageToClipboard(first.url);
   setStatus('最初の切り出し画像をコピーしました。');
 });
 
 downloadAllCropsBtn.addEventListener('click', () => {
   if (!lastResult?.data?.crops?.length) return;
-  lastResult.data.crops.forEach((url, index) => {
-    const ext = inferExtensionFromDataUrl(url);
-    downloadDataUrl(url, `${lastResult.filename}-crop-${index + 1}.${ext}`);
+  lastResult.data.crops.forEach((crop, index) => {
+    if (!crop?.url) return;
+    const ext = inferExtensionFromDataUrl(crop.url, 'png');
+    const label = crop.name || `crop-${index + 1}`;
+    downloadDataUrl(crop.url, `${lastResult.filename}-${label}.${ext}`);
   });
 });
 
 copyBoundingBtn.addEventListener('click', async () => {
-  if (!lastResult?.data?.bounding_image) return;
-  await copyImageToClipboard(lastResult.data.bounding_image);
+  if (!lastResult?.data?.bounding_image_url) return;
+  await copyImageToClipboard(lastResult.data.bounding_image_url);
   setStatus('バウンディング画像をコピーしました。');
 });
 
 downloadBoundingBtn.addEventListener('click', () => {
-  if (!lastResult?.data?.bounding_image) return;
-  const ext = inferExtensionFromDataUrl(lastResult.data.bounding_image, 'jpg');
-  downloadDataUrl(lastResult.data.bounding_image, `${lastResult.filename}-bounding.${ext}`);
+  if (!lastResult?.data?.bounding_image_url) return;
+  const ext = inferExtensionFromDataUrl(lastResult.data.bounding_image_url, 'jpg');
+  downloadDataUrl(lastResult.data.bounding_image_url, `${lastResult.filename}-bounding.${ext}`);
 });
 
 boundingImage.addEventListener('click', () => {
-  if (!lastResult?.data?.bounding_image) return;
-  openModal({ type: 'bounding', url: lastResult.data.bounding_image });
+  if (!lastResult?.data?.bounding_image_url) return;
+  openModal({ type: 'bounding', url: lastResult.data.bounding_image_url });
 });
 
 modalClose.addEventListener('click', closeModal);
@@ -528,10 +564,10 @@ function renderHistory() {
     button.type = 'button';
     button.className = 'history-entry';
 
-    if (entry.preview_image) {
+    if (entry.preview_image_url) {
       const thumb = document.createElement('img');
       thumb.className = 'history-thumb';
-      thumb.src = entry.preview_image;
+      thumb.src = entry.preview_image_url;
       thumb.alt = `${entry.filename || entry.id} プレビュー`;
       button.appendChild(thumb);
     }

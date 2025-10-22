@@ -9,9 +9,11 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.ocr_engine import (
+    WEB_HISTORY_DIR,
     delete_history_entry,
     list_history_entries,
     load_history_entry,
+    _load_entry_metadata,
     run_ocr_bytes,
 )
 
@@ -78,3 +80,45 @@ async def history_delete(entry_id: str) -> dict[str, str]:
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail="History entry not found") from exc
     return {"status": "deleted"}
+
+
+@app.get("/api/history/{entry_id}/image/bounding")
+async def history_bounding_image(entry_id: str) -> FileResponse:
+    try:
+        metadata, entry_dir = _load_entry_metadata(entry_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="History entry not found") from exc
+
+    bounding_name = metadata.get("bounding_image")
+    if not bounding_name:
+        raise HTTPException(status_code=404, detail="Bounding image not found")
+
+    path = (entry_dir / "artifacts" / bounding_name).resolve()
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Bounding image not found")
+
+    if WEB_HISTORY_DIR.resolve() not in path.parents:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    return FileResponse(path)
+
+
+@app.get("/api/history/{entry_id}/image/crop/{filename}")
+async def history_crop_image(entry_id: str, filename: str) -> FileResponse:
+    try:
+        metadata, entry_dir = _load_entry_metadata(entry_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="History entry not found") from exc
+
+    allowed = set(metadata.get("crops", []))
+    if filename not in allowed:
+        raise HTTPException(status_code=404, detail="Crop not found")
+
+    path = (entry_dir / "artifacts" / "images" / filename).resolve()
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Crop not found")
+
+    if WEB_HISTORY_DIR.resolve() not in path.parents:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    return FileResponse(path)
