@@ -9,6 +9,14 @@ body {
   color: #f1f1f1;
 }
 
+.sprite {
+  width: 0;
+  height: 0;
+  overflow: hidden;
+  position: absolute;
+  visibility: hidden;
+}
+
 .layout {
   display: flex;
   gap: 24px;
@@ -220,6 +228,9 @@ textarea.output {
   background: rgba(255, 255, 255, 0.1);
   color: inherit;
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .tab-buttons button.active {
@@ -231,6 +242,34 @@ textarea.output {
   display: flex;
   gap: 12px;
   margin-bottom: 12px;
+}
+
+.icon-button {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(255, 255, 255, 0.12);
+  color: inherit;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 0.2s ease;
+}
+
+.icon-button:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.icon-button svg {
+  width: 18px;
+  height: 18px;
+}
+
+.icon-button.mini {
+  width: 32px;
+  height: 32px;
 }
 
 .crops-grid {

@@ -5,10 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>DeepSeek OCR Web</title>
     <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="preload" href="/static/icons.svg" as="image" type="image/svg+xml" />
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js" defer></script>
     <script type="module" src="/static/main.js" defer></script>
   </head>
   <body>
+    <div class="sprite" aria-hidden="true">
+      <object type="image/svg+xml" data="/static/icons.svg"></object>
+    </div>
     <div class="layout">
       <div class="main-content">
         <div class="container">
@@ -33,12 +37,22 @@
             <section class="section full-width">
               <h2>抽出テキスト</h2>
               <div class="tab-buttons">
-                <button data-mode="plain" id="tab-plain">プレーン</button>
-                <button data-mode="markdown" class="active" id="tab-markdown">マークダウン</button>
+                <button data-mode="plain" id="tab-plain" title="プレーンテキスト">
+                  <svg><use href="#icon-copy" /></svg>
+                  <span>Plain</span>
+                </button>
+                <button data-mode="markdown" class="active" id="tab-markdown" title="マークダウン">
+                  <svg><use href="#icon-copy" /></svg>
+                  <span>Markdown</span>
+                </button>
               </div>
               <div class="action-buttons">
-                <button class="button secondary" id="copy-text">コピー</button>
-                <button class="button secondary" id="download-text">ダウンロード</button>
+                <button class="icon-button" id="copy-text" title="コピー">
+                  <svg><use href="#icon-copy" /></svg>
+                </button>
+                <button class="icon-button" id="download-text" title="ダウンロード">
+                  <svg><use href="#icon-download" /></svg>
+                </button>
               </div>
               <textarea class="output" id="plain-text" readonly></textarea>
               <div id="markdown-panel" class="hidden">
@@ -51,8 +65,12 @@
             <section class="section">
               <h2>切り出し画像</h2>
               <div class="action-buttons" id="crop-actions" hidden>
-                <button class="button secondary" id="copy-all-crops">すべてコピー</button>
-                <button class="button secondary" id="download-all-crops">すべてDL</button>
+                <button class="icon-button" id="copy-all-crops" title="切り出し画像をコピー">
+                  <svg><use href="#icon-copy" /></svg>
+                </button>
+                <button class="icon-button" id="download-all-crops" title="切り出し画像を一括DL">
+                  <svg><use href="#icon-download" /></svg>
+                </button>
               </div>
               <div class="crops-grid" id="crops-grid"></div>
             </section>
@@ -60,8 +78,12 @@
             <section class="section">
               <h2>バウンディング画像</h2>
               <div class="action-buttons" id="bounding-actions" hidden>
-                <button class="button secondary" id="copy-bounding">コピー</button>
-                <button class="button secondary" id="download-bounding">ダウンロード</button>
+                <button class="icon-button" id="copy-bounding" title="バウンディング画像をコピー">
+                  <svg><use href="#icon-copy" /></svg>
+                </button>
+                <button class="icon-button" id="download-bounding" title="バウンディング画像をDL">
+                  <svg><use href="#icon-download" /></svg>
+                </button>
               </div>
               <img id="bounding-image" class="bounding-image" alt="Bounding boxes" />
             </section>
@@ -71,7 +93,9 @@
       <aside class="history-panel">
         <div class="history-header">
           <h2>履歴</h2>
-          <button class="button secondary mini" id="refresh-history">更新</button>
+          <button class="icon-button mini" id="refresh-history" title="履歴を更新">
+            <svg><use href="#icon-download" /></svg>
+          </button>
         </div>
         <div class="history-list" id="history-list">
           <p class="history-empty">履歴はまだありません。</p>
@@ -84,8 +108,12 @@
         <span class="modal-close" id="modal-close">&times;</span>
         <img id="modal-image" alt="preview" />
         <div class="modal-actions">
-          <button class="button secondary" id="modal-copy">コピー</button>
-          <button class="button secondary" id="modal-download">ダウンロード</button>
+          <button class="icon-button" id="modal-copy" title="コピー">
+            <svg><use href="#icon-copy" /></svg>
+          </button>
+          <button class="icon-button" id="modal-download" title="ダウンロード">
+            <svg><use href="#icon-download" /></svg>
+          </button>
         </div>
       </div>
     </div>
