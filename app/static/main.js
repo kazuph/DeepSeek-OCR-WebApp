@@ -3,6 +3,7 @@ const infoEl = document.getElementById('model-info');
 const dropZone = document.getElementById('drop-zone');
 const fileInput = document.getElementById('file-input');
 const queueStatus = document.getElementById('queue-status');
+const queueListEl = document.getElementById('queue-list');
 const plainText = document.getElementById('plain-text');
 const markdownPanel = document.getElementById('markdown-panel');
 const markdownRaw = document.getElementById('markdown-raw');
@@ -84,6 +85,7 @@ function updateQueueStatus() {
   } else {
     queueStatus.textContent = '';
   }
+  renderQueue();
 }
 
 function inferExtensionFromDataUrl(dataUrl, fallback = 'png') {
@@ -173,7 +175,11 @@ function handleFiles(files) {
     return;
   }
   Array.from(files).forEach((file) => {
-    queue.push({ file, name: file.name || `upload-${Date.now()}` });
+    queue.push({
+      id: `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+      file,
+      name: file.name || `upload-${Date.now()}`,
+    });
   });
   updateQueueStatus();
   processQueue();
@@ -184,7 +190,7 @@ async function processQueue() {
     return;
   }
   processing = true;
-  currentItem = queue.shift();
+  currentItem = queue.shift() || null;
   updateQueueStatus();
 
   if (currentItem) {
@@ -229,7 +235,11 @@ window.addEventListener('paste', (event) => {
     if (item.kind === 'file') {
       const file = item.getAsFile();
       if (file) {
-        queue.push({ file, name: file.name || `paste-${Date.now()}` });
+        queue.push({
+          id: `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+          file,
+          name: file.name || `paste-${Date.now()}`,
+        });
       }
     }
   }
@@ -363,6 +373,39 @@ function closeModal() {
   modalContext = null;
 }
 
+function renderQueue() {
+  queueListEl.innerHTML = '';
+
+  if (processing && currentItem) {
+    const processingItem = document.createElement('div');
+    processingItem.className = 'queue-item processing';
+    processingItem.innerHTML = `
+      <span class="queue-name">${currentItem.name}</span>
+      <span class="queue-state">処理中</span>
+    `;
+    queueListEl.appendChild(processingItem);
+  }
+
+  if (queue.length) {
+    queue.forEach((item) => {
+      const entry = document.createElement('div');
+      entry.className = 'queue-item';
+      entry.innerHTML = `
+        <span class="queue-name">${item.name}</span>
+        <span class="queue-state">待機中</span>
+      `;
+      queueListEl.appendChild(entry);
+    });
+  }
+
+  if (!processing && queue.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'queue-item';
+    empty.innerHTML = '<span class="queue-name">キューは空です</span>';
+    queueListEl.appendChild(empty);
+  }
+}
+
 async function uploadFile(item) {
   setStatus(`${item.name} を解析中…`);
   const formData = new FormData();
@@ -462,8 +505,9 @@ function renderHistory() {
 
     const deleteBtn = document.createElement('button');
     deleteBtn.type = 'button';
-    deleteBtn.className = 'button secondary mini history-delete';
-    deleteBtn.textContent = '削除';
+    deleteBtn.className = 'icon-button mini history-delete';
+    deleteBtn.title = '履歴を削除';
+    deleteBtn.innerHTML = '<svg><use href="#icon-trash" /></svg>';
     deleteBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       deleteHistoryEntry(entry.id, entry.filename || entry.id);

@@ -30,21 +30,16 @@
             </label>
           </section>
 
-          <div class="status" id="status"></div>
-          <div class="queue" id="queue-status"></div>
+      <div class="status" id="status"></div>
+      <div class="queue" id="queue-status"></div>
+      <div class="queue-list" id="queue-list"></div>
 
           <div class="results">
             <section class="section full-width">
               <h2>抽出テキスト</h2>
               <div class="tab-buttons">
-                <button data-mode="plain" id="tab-plain" title="プレーンテキスト">
-                  <svg><use href="#icon-copy" /></svg>
-                  <span>Plain</span>
-                </button>
-                <button data-mode="markdown" class="active" id="tab-markdown" title="マークダウン">
-                  <svg><use href="#icon-copy" /></svg>
-                  <span>Markdown</span>
-                </button>
+                <button data-mode="plain" id="tab-plain">プレーン</button>
+                <button data-mode="markdown" class="active" id="tab-markdown">マークダウン</button>
               </div>
               <div class="action-buttons">
                 <button class="icon-button" id="copy-text" title="コピー">
