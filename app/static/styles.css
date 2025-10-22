@@ -375,15 +375,16 @@ textarea.output {
 
 .modal-content {
   position: relative;
-  max-width: 90vw;
-  max-height: 90vh;
-  background: #1c1c1c;
-  padding: 16px;
-  border-radius: 12px;
-  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.5);
+  width: 96vw;
+  height: 96vh;
+  background: rgba(18, 18, 18, 0.96);
+  padding: 12px;
+  border-radius: 16px;
+  box-shadow: 0 30px 60px rgba(0, 0, 0, 0.7);
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
 }
 
 .modal.hidden {
@@ -391,9 +392,12 @@ textarea.output {
 }
 
 .modal-content img {
-  max-width: 85vw;
-  max-height: 70vh;
-  border-radius: 8px;
+  flex: 1 1 auto;
+  width: 100%;
+  height: calc(96vh - 80px);
+  border-radius: 12px;
+  object-fit: contain;
+  background: rgba(0, 0, 0, 0.85);
 }
 
 .modal-close {
