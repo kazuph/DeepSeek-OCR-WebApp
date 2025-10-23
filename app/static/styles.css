@@ -192,10 +192,154 @@ h1 {
   font-size: 15px;
 }
 
+.models-section {
+  margin-bottom: 24px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.model-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.model-option {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 10px;
+  align-items: center;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.05);
+  cursor: pointer;
+  transition: border-color 0.2s ease, background 0.2s ease;
+  min-width: 220px;
+  max-width: 340px;
+}
+
+.model-option:hover,
+.model-option:focus-within {
+  border-color: #ff9800;
+  background: rgba(255, 152, 0, 0.12);
+}
+
+.model-option input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+}
+
+.model-option-label {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.model-option-description {
+  grid-column: 1 / -1;
+  font-size: 12px;
+  opacity: 0.7;
+  line-height: 1.5;
+}
+
 .queue {
   margin-bottom: 16px;
   font-size: 14px;
   opacity: 0.85;
+}
+
+.variant-grid {
+  display: grid;
+  gap: 18px;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  align-items: stretch;
+}
+
+.variant-card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 14px;
+  padding: 16px;
+  min-height: 160px;
+}
+
+.variant-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.variant-card-title {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.variant-card-meta {
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+.variant-card-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.variant-card-actions .icon-button {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.variant-card-content {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.variant-markdown {
+  max-height: 360px;
+  overflow: auto;
+  background: rgba(0, 0, 0, 0.25);
+  padding: 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  line-height: 1.6;
+}
+
+.variant-markdown p {
+  margin: 0 0 0.6em;
+}
+
+.variant-plain {
+  min-height: 220px;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  color: inherit;
+  padding: 12px;
+  line-height: 1.6;
+  resize: vertical;
+}
+
+.variant-plain.hidden,
+.variant-markdown.hidden {
+  display: none;
+}
+
+.bounding-card .variant-card-content {
+  align-items: center;
+}
+
+.bounding-card .bounding-image {
+  max-height: 480px;
 }
 
 .queue-list {

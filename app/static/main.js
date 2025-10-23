@@ -1,25 +1,15 @@
 const statusEl = document.getElementById('status');
 const infoEl = document.getElementById('model-info');
+const modelOptionsEl = document.getElementById('model-options');
 const dropZone = document.getElementById('drop-zone');
 const fileInput = document.getElementById('file-input');
 const queueStatus = document.getElementById('queue-status');
 const queueListEl = document.getElementById('queue-list');
-const plainText = document.getElementById('plain-text');
-const markdownPanel = document.getElementById('markdown-panel');
-const markdownRender = document.getElementById('markdown-render');
-const cropsGrid = document.getElementById('crops-grid');
-const boundingImage = document.getElementById('bounding-image');
-const metadataPanel = document.getElementById('metadata-panel');
+const textVariantGrid = document.getElementById('text-variant-grid');
+const cropsVariantGrid = document.getElementById('crops-variant-grid');
+const boundingVariantGrid = document.getElementById('bounding-variant-grid');
 const tabPlain = document.getElementById('tab-plain');
 const tabMarkdown = document.getElementById('tab-markdown');
-const copyTextBtn = document.getElementById('copy-text');
-const downloadTextBtn = document.getElementById('download-text');
-const cropActions = document.getElementById('crop-actions');
-const copyAllCropsBtn = document.getElementById('copy-all-crops');
-const downloadAllCropsBtn = document.getElementById('download-all-crops');
-const boundingActions = document.getElementById('bounding-actions');
-const copyBoundingBtn = document.getElementById('copy-bounding');
-const downloadBoundingBtn = document.getElementById('download-bounding');
 const modal = document.getElementById('modal');
 const modalImage = document.getElementById('modal-image');
 const modalClose = document.getElementById('modal-close');
@@ -46,10 +36,171 @@ let modalContext = null;
 let historyEntries = [];
 let activeHistoryId = null;
 const inputPreviews = [];
+const textCardRegistry = [];
 let progressTimer = null;
 let progressValue = 0;
 let progressSession = 0;
 let activeProgressSession = 0;
+let availableModels = [];
+let selectedModels = new Set();
+let serverStatusText = 'モデル初期化待機中…';
+const MATH_LINEBREAK_ENVS = new Set([
+  'align',
+  'align*',
+  'alignat',
+  'alignat*',
+  'aligned',
+  'aligned*',
+  'alignedat',
+  'alignedat*',
+  'cases',
+  'gather',
+  'gather*',
+  'gathered',
+  'multline',
+  'multline*',
+  'split',
+]);
+
+function labelForModel(key) {
+  const descriptor = availableModels.find((item) => item.key === key);
+  if (descriptor) {
+    return descriptor.label;
+  }
+  if (!key) {
+    return '不明なモデル';
+  }
+  return key;
+}
+
+function updateModelInfo(statusText = null) {
+  if (typeof statusText === 'string') {
+    serverStatusText = statusText;
+  }
+  const selectedLabels = [...selectedModels].map(labelForModel).join(', ') || '未選択';
+  if (infoEl) {
+    infoEl.textContent = `サーバー状態: ${serverStatusText} / 選択中: ${selectedLabels}`;
+  }
+}
+
+function persistModelSelection() {
+  try {
+    const stored = JSON.stringify([...selectedModels]);
+    localStorage.setItem('ocr.selectedModels', stored);
+  } catch (error) {
+    console.debug('モデル選択の保存に失敗しました', error);
+  }
+}
+
+function renderModelOptions() {
+  if (!modelOptionsEl) {
+    return;
+  }
+
+  modelOptionsEl.innerHTML = '';
+  const fragment = document.createDocumentFragment();
+
+  if (!availableModels.length) {
+    const fallback = document.createElement('p');
+    fallback.className = 'metadata';
+    fallback.textContent = '利用できるモデル情報を取得できませんでした。';
+    fragment.appendChild(fallback);
+    modelOptionsEl.appendChild(fragment);
+    updateModelInfo();
+    return;
+  }
+
+  availableModels.forEach((model) => {
+    const option = document.createElement('label');
+    option.className = 'model-option';
+
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.value = model.key;
+    checkbox.checked = selectedModels.has(model.key);
+    checkbox.addEventListener('change', () => {
+      if (checkbox.checked) {
+        selectedModels.add(model.key);
+      } else if (selectedModels.size > 1) {
+        selectedModels.delete(model.key);
+      } else {
+        // 1つは必ず選択済みにする
+        checkbox.checked = true;
+      }
+      updateModelInfo();
+      persistModelSelection();
+    });
+
+    const label = document.createElement('span');
+    label.className = 'model-option-label';
+    label.textContent = model.label;
+
+    option.append(checkbox, label);
+
+    if (model.description) {
+      const description = document.createElement('span');
+      description.className = 'model-option-description';
+      description.textContent = model.description;
+      option.appendChild(description);
+    }
+
+    fragment.appendChild(option);
+  });
+
+  modelOptionsEl.appendChild(fragment);
+  updateModelInfo();
+}
+
+function loadStoredModelSelection() {
+  try {
+    const stored = localStorage.getItem('ocr.selectedModels');
+    if (stored) {
+      const parsed = JSON.parse(stored);
+      if (Array.isArray(parsed) && parsed.length) {
+        selectedModels = new Set(parsed);
+      }
+    }
+  } catch (error) {
+    console.debug('モデル選択の読み込みに失敗しました', error);
+  }
+}
+
+function ensureModelSelection() {
+  selectedModels = new Set([...selectedModels].filter((model) => availableModels.some((item) => item.key === model)));
+  if (!selectedModels.size && availableModels.length) {
+    selectedModels.add(availableModels[0].key);
+  }
+}
+
+function getSelectedModels() {
+  return [...selectedModels];
+}
+
+async function fetchModels() {
+  let models = [];
+  try {
+    const res = await fetch('/api/models');
+    if (!res.ok) {
+      throw new Error(res.statusText);
+    }
+    const data = await res.json();
+    if (Array.isArray(data) && data.length) {
+      models = data;
+    }
+  } catch (error) {
+    console.warn('モデルリストの取得に失敗しました。既定値を使用します。', error);
+    models = [
+      { key: 'deepseek', label: 'DeepSeek OCR', description: '' },
+      { key: 'yomitoku', label: 'YomiToku Document Analyzer', description: '' },
+    ];
+  }
+
+  availableModels = models;
+  ensureModelSelection();
+  updateModelInfo('モデル一覧取得済み');
+  renderModelOptions();
+  persistModelSelection();
+}
 
 function sanitizeMathContent(source) {
   if (!source) {
@@ -63,7 +214,8 @@ function sanitizeMathContent(source) {
     const escaped = preserved.replace(/_/g, '\\_').replace(new RegExp(placeholder, 'g'), '\\_');
     return `\\text{${escaped}}`;
   });
-  return ensureDisplayMathLineBreaks(escapedText);
+  const normalizedMath = ensureDisplayMathLineBreaks(escapedText);
+  return ensureMathLineBreaks(normalizedMath);
 }
 
 function ensureDisplayMathLineBreaks(math) {
@@ -91,14 +243,69 @@ function ensureDisplayMathLineBreaks(math) {
   });
 }
 
+function ensureMathLineBreaks(math) {
+  if (!math) {
+    return math;
+  }
+
+  const envPattern = /\\begin\{([a-zA-Z*]+)\}([\s\S]*?)\\end\{\1\}/g;
+
+  return math.replace(envPattern, (match, env, body) => {
+    if (!MATH_LINEBREAK_ENVS.has(env)) {
+      return match;
+    }
+
+    const normalizedBody = body.replace(/\\[ \t]+(?=\S)/g, () => '\\' + '\n');
+    const rows = normalizedBody.split(/\r?\n/);
+    const newline = normalizedBody.includes('\r\n') ? '\r\n' : '\n';
+    let lastNonEmpty = -1;
+
+    for (let i = rows.length - 1; i >= 0; i -= 1) {
+      if (rows[i].trim()) {
+        lastNonEmpty = i;
+        break;
+      }
+    }
+
+    if (lastNonEmpty === -1) {
+      return match;
+    }
+
+    const breakPattern = /\\\\(\[[^\]]*])?(?:\\[a-zA-Z]+|[,;:!?])?$/;
+
+    const processed = rows.map((row, index) => {
+      if (index >= lastNonEmpty) {
+        return row;
+      }
+
+      if (!row.trim()) {
+        return row;
+      }
+
+      const trimmedEnd = row.trimEnd();
+      if (breakPattern.test(trimmedEnd)) {
+        return row;
+      }
+
+      const trailingWhitespace = row.slice(trimmedEnd.length);
+      return `${trimmedEnd}\\\\${trailingWhitespace}`;
+    });
+
+    const updatedBody = processed.join(newline);
+    return match.replace(body, updatedBody);
+  });
+}
+
+
+
 async function pingServer() {
   try {
     const res = await fetch('/api/ping');
     if (!res.ok) throw new Error(res.statusText);
     const data = await res.json();
-    infoEl.textContent = `サーバー状態: ${data.status}`;
+    updateModelInfo(`オンライン (${data.status})`);
   } catch (error) {
-    infoEl.textContent = 'サーバーに接続できません';
+    updateModelInfo('サーバーに接続できません');
   }
 }
 
@@ -391,6 +598,11 @@ function normalizeMathElements(container) {
 
   const elements = container.querySelectorAll('p, div');
   elements.forEach((element) => {
+    element.querySelectorAll('br').forEach((br) => {
+      const replacement = document.createTextNode('\\\\\n');
+      br.replaceWith(replacement);
+    });
+
     const text = element.textContent;
     if (!text) {
       return;
@@ -553,57 +765,122 @@ function fallbackMathRender(container) {
   });
 }
 
-function transformMarkdown(markdown, crops) {
+function transformMarkdown(markdown, variant) {
   if (!markdown) {
     return markdown;
   }
 
   let processed = normalizeMathBlocks(markdown);
 
-  if (!Array.isArray(crops) || !crops.length) {
+  const replacements = new Map();
+
+  const addMapping = (rawKey, value) => {
+    if (!rawKey || !value) return;
+    const normalized = rawKey.replace(/\\/g, '/');
+    const base = normalized.split('?')[0];
+    const variants = new Set([
+      rawKey,
+      normalized,
+      base,
+      base.replace(/^\.\/?/, ''),
+      base.replace(/^\.\.?\//, ''),
+      base.replace(/^artifacts\//, ''),
+      base.replace(/^\.\/?artifacts\//, ''),
+    ]);
+    const name = base.split('/').pop();
+    if (name) {
+      variants.add(name);
+    }
+    variants.forEach((variantKey) => {
+      if (variantKey) {
+        replacements.set(variantKey, value);
+      }
+    });
+  };
+
+  if (variant && Array.isArray(variant.crops)) {
+    variant.crops.forEach((crop, index) => {
+      if (!crop || !crop.url) return;
+      if (crop.path) addMapping(crop.path, crop.url);
+      if (crop.name) {
+        addMapping(crop.name, crop.url);
+        addMapping(`images/${crop.name}`, crop.url);
+        addMapping(`artifacts/${crop.name}`, crop.url);
+      }
+      addMapping(String(index), crop.url);
+      addMapping(`images/${index}`, crop.url);
+      addMapping(`images/${index}.jpg`, crop.url);
+      addMapping(`images/${index}.jpeg`, crop.url);
+      addMapping(`images/${index}.png`, crop.url);
+    });
+  }
+
+  if (variant?.boundingUrl) {
+    const boundingPath = variant?.metadata?.bounding_image_path || variant?.metadata?.boundingImagePath;
+    if (boundingPath) {
+      addMapping(boundingPath, variant.boundingUrl);
+      const name = boundingPath.split('/').pop();
+      if (name) addMapping(name, variant.boundingUrl);
+    }
+  }
+
+  if (!replacements.size) {
     return processed;
   }
 
-  const replacements = new Map();
-  crops.forEach((crop, index) => {
-    if (!crop || !crop.url) return;
-    if (crop.name) {
-      replacements.set(crop.name, crop.url);
-      replacements.set(`images/${crop.name}`, crop.url);
+  const resolveAssetPath = (source) => {
+    if (!source) return null;
+    const candidates = new Set();
+    const trimmed = source.trim();
+    const noQuery = trimmed.split('?')[0];
+    candidates.add(trimmed);
+    candidates.add(noQuery);
+    candidates.add(noQuery.replace(/^\.\/?/, ''));
+    candidates.add(noQuery.replace(/^\.\.?\//, ''));
+    candidates.add(noQuery.replace(/\\/g, '/'));
+    candidates.add(noQuery.replace(/\\/g, '/').replace(/^\.\/?/, ''));
+    candidates.add(noQuery.replace(/\\/g, '/').replace(/^\.\.?\//, ''));
+    const name = noQuery.split('/').pop();
+    if (name) candidates.add(name);
+    for (const key of candidates) {
+      if (replacements.has(key)) {
+        return replacements.get(key);
+      }
     }
-    replacements.set(`${index}`, crop.url);
-    replacements.set(`images/${index}`, crop.url);
-    replacements.set(`images/${index}.jpg`, crop.url);
-    replacements.set(`images/${index}.jpeg`, crop.url);
-    replacements.set(`images/${index}.png`, crop.url);
-  });
+    return null;
+  };
 
-  return processed.replace(/!\[(.*?)\]\(([^)]+)\)/g, (match, alt, path) => {
-    const key = path.trim();
-    const direct = replacements.get(key);
-    if (direct) {
-      return `![${alt}](${direct})`;
-    }
-    const file = key.split('/').pop();
-    if (file && replacements.has(file)) {
-      return `![${alt}](${replacements.get(file)})`;
+  processed = processed.replace(/!\[(.*?)\]\(([^)]+)\)/g, (match, alt, path) => {
+    const resolved = resolveAssetPath(path);
+    if (resolved) {
+      return `![${alt}](${resolved})`;
     }
     return match;
   });
+
+  processed = processed.replace(/<img\s+([^>]*?)src=["']([^"']+)["']([^>]*?)>/gi, (match, before, src, after) => {
+    const resolved = resolveAssetPath(src);
+    if (!resolved) {
+      return match;
+    }
+    return match.replace(src, resolved);
+  });
+
+  return processed;
 }
 
 function clearResults() {
   closeModal();
-  if (plainText) {
-    plainText.value = '';
+  if (textVariantGrid) {
+    textVariantGrid.innerHTML = '<p class="metadata">結果はまだありません。</p>';
   }
-  markdownRender.innerHTML = '';
-  cropsGrid.innerHTML = '<p>切り出し画像はまだありません。</p>';
-  boundingImage.src = '';
-  boundingImage.alt = '';
-  metadataPanel.textContent = '';
-  boundingActions.hidden = true;
-  cropActions.hidden = true;
+  if (cropsVariantGrid) {
+    cropsVariantGrid.innerHTML = '<p class="metadata">切り出し画像はまだありません。</p>';
+  }
+  if (boundingVariantGrid) {
+    boundingVariantGrid.innerHTML = '<p class="metadata">バウンディング画像はまだありません。</p>';
+  }
+  textCardRegistry.length = 0;
   lastResult = null;
 }
 
@@ -661,63 +938,347 @@ function addImageControls(wrapper, crop, filename, index) {
   wrapper.appendChild(controls);
 }
 
-function displayResult(data, filename, historyId = null, createdAt = null) {
-  const firstDisplay = !lastResult;
-  lastResult = { data, filename, historyId, createdAt };
 
-  if (plainText) {
-    plainText.value = data.text_plain || '';
+function deriveBaseName(name) {
+  if (!name) return 'ocr';
+  const trimmed = name.trim();
+  if (!trimmed) return 'ocr';
+  return trimmed.replace(/\.[^.]+$/, '');
+}
+
+function normalizeVariants(data) {
+  if (Array.isArray(data?.variants) && data.variants.length) {
+    return data.variants.map((variant, index) => ({
+      key: variant.model || `model-${index}`,
+      label: variant.label || labelForModel(variant.model || `model-${index}`),
+      textPlain: variant.text_plain || '',
+      textMarkdown: variant.text_markdown || '',
+      boundingUrl: variant.bounding_image_url || null,
+      crops: Array.isArray(variant.crops) ? variant.crops : [],
+      previewUrl: variant.preview_image_url || null,
+      metadata: variant.metadata || {},
+      preview: variant.preview || '',
+    }));
   }
-  const markdownText = data.text_markdown || '';
-  const cropList = Array.isArray(data.crops) ? data.crops.filter((crop) => crop && crop.url) : [];
-  const processedMarkdown = transformMarkdown(markdownText, cropList);
-  markdownRender.innerHTML = processedMarkdown
-    ? window.marked.parse(processedMarkdown)
-    : '<p>マークダウン出力はありません。</p>';
-  normalizeMathNodes(markdownRender);
-  normalizeMathElements(markdownRender);
-  renderMath(markdownRender);
 
-  if (cropList.length > 0) {
-    cropsGrid.innerHTML = '';
-    cropList.forEach((crop, index) => {
+  return [
+    {
+      key: data?.metadata?.model || 'deepseek',
+      label: data?.metadata?.model_label || labelForModel(data?.metadata?.model || 'deepseek'),
+      textPlain: data?.text_plain || '',
+      textMarkdown: data?.text_markdown || '',
+      boundingUrl: data?.bounding_image_url || null,
+      crops: Array.isArray(data?.crops) ? data.crops : [],
+      previewUrl: data?.preview_image_url || null,
+      metadata: data?.metadata || {},
+      preview: data?.preview || '',
+    },
+  ];
+}
+
+function createIconButton(iconId, title, onClick) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'icon-button';
+  if (title) {
+    button.title = title;
+  }
+  button.innerHTML = `<svg><use href="#icon-${iconId}" /></svg>`;
+  button.addEventListener('click', (event) => {
+    event.stopPropagation();
+    onClick();
+  });
+  return button;
+}
+
+function createVariantHeader(variant, context, extraMeta = '') {
+  const header = document.createElement('div');
+  header.className = 'variant-card-header';
+
+  const title = document.createElement('span');
+  title.className = 'variant-card-title';
+  title.textContent = variant.label;
+  header.appendChild(title);
+
+  const metaParts = [];
+  if (extraMeta) {
+    metaParts.push(extraMeta);
+  }
+  if (context.createdLabel && context.createdLabel !== '-') {
+    metaParts.push(`作成: ${context.createdLabel}`);
+  }
+  if (metaParts.length) {
+    const meta = document.createElement('span');
+    meta.className = 'variant-card-meta';
+    meta.textContent = metaParts.join(' / ');
+    header.appendChild(meta);
+  }
+
+  return header;
+}
+
+function renderTextVariants(variants, context) {
+  if (!textVariantGrid) return;
+  textVariantGrid.innerHTML = '';
+  textCardRegistry.length = 0;
+
+  if (!variants.length) {
+    const empty = document.createElement('p');
+    empty.className = 'metadata';
+    empty.textContent = 'テキスト出力はありませんでした。';
+    textVariantGrid.appendChild(empty);
+    return;
+  }
+
+  variants.forEach((variant) => {
+    const card = document.createElement('div');
+    card.className = 'variant-card text-card';
+    card.dataset.model = variant.key;
+
+    const header = createVariantHeader(
+      variant,
+      context,
+      `クロップ: ${variant.crops.length}件`
+    );
+
+    const actions = document.createElement('div');
+    actions.className = 'variant-card-actions';
+    actions.appendChild(createIconButton('copy', 'テキストをコピー', () => copyVariantText(variant)));
+    actions.appendChild(createIconButton('download', 'テキストをダウンロード', () => downloadVariantText(variant, context.downloadBase)));
+
+    const content = document.createElement('div');
+    content.className = 'variant-card-content';
+
+    const markdownContainer = document.createElement('div');
+    markdownContainer.className = 'variant-markdown';
+
+    const plainContainer = document.createElement('textarea');
+    plainContainer.className = 'variant-plain hidden';
+    plainContainer.readOnly = true;
+
+    const processedMarkdown = transformMarkdown(variant.textMarkdown, variant);
+    if (processedMarkdown) {
+      markdownContainer.innerHTML = window.marked.parse(processedMarkdown);
+      normalizeMathNodes(markdownContainer);
+      normalizeMathElements(markdownContainer);
+      renderMath(markdownContainer);
+    } else {
+      markdownContainer.innerHTML = '<p>マークダウン出力はありません。</p>';
+    }
+
+    plainContainer.value = variant.textPlain || variant.textMarkdown || '';
+
+    content.append(markdownContainer, plainContainer);
+    card.append(header, actions, content);
+    textVariantGrid.appendChild(card);
+
+    textCardRegistry.push({
+      card,
+      variant,
+      markdownEl: markdownContainer,
+      plainEl: plainContainer,
+      filename: context.downloadBase,
+    });
+  });
+
+  updateTextCardsDisplay();
+}
+
+function renderCropVariants(variants, context) {
+  if (!cropsVariantGrid) return;
+  cropsVariantGrid.innerHTML = '';
+
+  if (!variants.length) {
+    const empty = document.createElement('p');
+    empty.className = 'metadata';
+    empty.textContent = '切り出し画像はありませんでした。';
+    cropsVariantGrid.appendChild(empty);
+    return;
+  }
+
+  variants.forEach((variant) => {
+    const card = document.createElement('div');
+    card.className = 'variant-card crop-card';
+    card.dataset.model = variant.key;
+
+    const header = createVariantHeader(
+      variant,
+      context,
+      `切り出し: ${variant.crops.length}件`
+    );
+
+    card.appendChild(header);
+
+    if (!variant.crops.length) {
+      const empty = document.createElement('p');
+      empty.className = 'metadata';
+      empty.textContent = '切り出し画像はありませんでした。';
+      card.appendChild(empty);
+      cropsVariantGrid.appendChild(card);
+      return;
+    }
+
+    const grid = document.createElement('div');
+    grid.className = 'crops-grid';
+
+    variant.crops.forEach((crop, index) => {
+      if (!crop || !crop.url) {
+        return;
+      }
       const wrapper = document.createElement('div');
       wrapper.className = 'crop-item';
       const img = document.createElement('img');
       img.src = crop.url;
-      img.alt = `Crop ${index + 1}`;
+      img.alt = `${variant.label} クロップ ${index + 1}`;
       img.dataset.index = index;
-      img.addEventListener('click', () => openModal({ type: 'crop', url: crop.url, index }));
+      img.addEventListener('click', () => openModal({ type: 'crop', url: crop.url, name: crop.name, variant: variant.key, index }));
       wrapper.appendChild(img);
-      addImageControls(wrapper, crop, filename, index);
-      cropsGrid.appendChild(wrapper);
+      addImageControls(wrapper, crop, `${context.downloadBase}-${variant.key}`, index);
+      grid.appendChild(wrapper);
     });
-    cropActions.hidden = false;
-  } else {
-    cropsGrid.innerHTML = '<p>切り出し画像はありませんでした。</p>';
-    cropActions.hidden = true;
-  }
 
-  if (data.bounding_image_url) {
-    boundingImage.src = data.bounding_image_url;
-    boundingImage.alt = `${filename} のバウンディングボックス`;
-    boundingActions.hidden = false;
-  } else {
-    boundingImage.src = '';
-    boundingImage.alt = 'バウンディング画像は生成されませんでした';
-    boundingActions.hidden = true;
-  }
+    card.appendChild(grid);
+    cropsVariantGrid.appendChild(card);
+  });
+}
 
-  const cropCount = cropList.length;
-  const createdText = formatDate(createdAt || data.created_at);
-  const inputName = data.metadata?.input || filename;
-  metadataPanel.textContent = `ファイル: ${inputName} / クロップ数: ${cropCount} / 作成: ${createdText}`;
+function renderBoundingVariants(variants, context) {
+  if (!boundingVariantGrid) return;
+  boundingVariantGrid.innerHTML = '';
+
+  variants.forEach((variant) => {
+    const card = document.createElement('div');
+    card.className = 'variant-card bounding-card';
+    card.dataset.model = variant.key;
+
+    const header = createVariantHeader(variant, context);
+    card.appendChild(header);
+
+    const actions = document.createElement('div');
+    actions.className = 'variant-card-actions';
+
+    const body = document.createElement('div');
+    body.className = 'variant-card-content';
+
+    if (variant.boundingUrl) {
+      const image = document.createElement('img');
+      image.className = 'bounding-image';
+      image.src = variant.boundingUrl;
+      image.alt = `${variant.label} のバウンディング画像`;
+      image.addEventListener('click', () => openModal({ type: 'bounding', url: variant.boundingUrl, name: `${context.downloadBase}-${variant.key}-bounding` }));
+
+      actions.appendChild(createIconButton('copy', 'バウンディング画像をコピー', () => copyImageToClipboard(variant.boundingUrl).then(() => setStatus('バウンディング画像をコピーしました。')).catch(() => setStatus('画像をコピーできませんでした。', true))));
+
+      actions.appendChild(createIconButton('download', 'バウンディング画像をDL', () => {
+        const ext = inferExtensionFromDataUrl(variant.boundingUrl, 'jpg');
+        downloadDataUrl(variant.boundingUrl, `${context.downloadBase}-${variant.key}-bounding.${ext}`);
+      }));
+
+      body.appendChild(image);
+    } else {
+      const empty = document.createElement('p');
+      empty.className = 'metadata';
+      empty.textContent = 'バウンディング画像は生成されませんでした。';
+      body.appendChild(empty);
+    }
+
+    card.append(actions, body);
+    boundingVariantGrid.appendChild(card);
+  });
+}
+
+function displayResult(data, filename, historyId = null, createdAt = null) {
+  const firstDisplay = !lastResult;
+  const variants = normalizeVariants(data);
+  const effectiveFilename = filename || data?.filename || 'ocr';
+  const downloadBase = deriveBaseName(effectiveFilename);
+  const createdTimestamp = createdAt || data?.created_at || null;
+  const context = {
+    filename: effectiveFilename,
+    downloadBase,
+    createdAt: createdTimestamp,
+    createdLabel: formatDate(createdTimestamp),
+    warnings: Array.isArray(data?.metadata?.warnings) ? data.metadata.warnings.filter(Boolean) : [],
+  };
+
+  lastResult = {
+    raw: data,
+    variants,
+    filename: downloadBase,
+    originalFilename: effectiveFilename,
+    historyId,
+    createdAt: createdTimestamp,
+  };
+
+  renderTextVariants(variants, context);
+  renderCropVariants(variants, context);
+  renderBoundingVariants(variants, context);
+
+  const modelSummary = variants.map((variant) => `${variant.label}`).join(', ');
+  const cropSummary = variants.map((variant) => `${variant.label}:${variant.crops.length}`).join(' / ');
+  const warningText = context.warnings.length ? ` / 警告: ${context.warnings.join(' / ')}` : '';
+  setStatus(`ファイル: ${effectiveFilename} / モデル: ${modelSummary} / クロップ: ${cropSummary}${warningText}`);
 
   if (firstDisplay) {
     setTab('markdown');
+  } else {
+    updateTextCardsDisplay();
   }
 }
 
+function updateTextCardsDisplay() {
+  textCardRegistry.forEach((entry) => {
+    if (!entry.markdownEl || !entry.plainEl) {
+      return;
+    }
+    if (currentTextMode === 'plain') {
+      entry.markdownEl.classList.add('hidden');
+      entry.plainEl.classList.remove('hidden');
+    } else {
+      entry.markdownEl.classList.remove('hidden');
+      entry.plainEl.classList.add('hidden');
+    }
+  });
+}
+
+function copyVariantText(variant) {
+  const text = currentTextMode === 'plain'
+    ? (variant.textPlain || variant.textMarkdown || '')
+    : (variant.textMarkdown || variant.textPlain || '');
+
+  if (!text) {
+    setStatus('コピーするテキストがありません。', true);
+    return;
+  }
+
+  navigator.clipboard.writeText(text)
+    .then(() => setStatus('テキストをコピーしました。'))
+    .catch(() => setStatus('テキストをコピーできませんでした。', true));
+}
+
+function downloadTextFile(content, filename, mime = 'text/plain') {
+  const blob = new Blob([content], { type: `${mime};charset=utf-8` });
+  const url = URL.createObjectURL(blob);
+  downloadDataUrl(url, filename);
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+function downloadVariantText(variant, filenameBase) {
+  const ext = currentTextMode === 'plain' ? 'txt' : 'md';
+  const text = currentTextMode === 'plain'
+    ? (variant.textPlain || variant.textMarkdown || '')
+    : (variant.textMarkdown || variant.textPlain || '');
+
+  if (!text) {
+    setStatus('ダウンロードするテキストがありません。', true);
+    return;
+  }
+
+  const safeBase = filenameBase || 'ocr';
+  const filename = `${safeBase}-${variant.key}.${ext}`;
+  const mime = ext === 'md' ? 'text/markdown' : 'text/plain';
+  downloadTextFile(text, filename, mime);
+}
 function handleFiles(files) {
   if (!files || files.length === 0) {
     return;
@@ -818,85 +1379,15 @@ function setTab(mode) {
   if (mode === 'plain') {
     tabPlain.classList.add('active');
     tabMarkdown.classList.remove('active');
-    if (plainText) {
-      plainText.classList.remove('hidden');
-    }
-    markdownPanel.classList.add('hidden');
   } else {
     tabPlain.classList.remove('active');
     tabMarkdown.classList.add('active');
-    if (plainText) {
-      plainText.classList.add('hidden');
-    }
-    markdownPanel.classList.remove('hidden');
   }
+  updateTextCardsDisplay();
 }
 
 tabPlain.addEventListener('click', () => setTab('plain'));
 tabMarkdown.addEventListener('click', () => setTab('markdown'));
-
-copyTextBtn.addEventListener('click', () => {
-  let text = '';
-  if (currentTextMode === 'plain') {
-    text = plainText?.value || '';
-  } else if (lastResult?.data?.text_markdown) {
-    text = lastResult.data.text_markdown;
-  }
-  if (text) {
-    navigator.clipboard.writeText(text).then(() => setStatus('テキストをコピーしました。'));
-  }
-});
-
-downloadTextBtn.addEventListener('click', () => {
-  const isPlain = currentTextMode === 'plain';
-  const text = isPlain ? (plainText?.value || '') : (lastResult?.data?.text_markdown || '');
-  if (!text) {
-    return;
-  }
-  const ext = isPlain ? 'txt' : 'md';
-  const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `ocr.${ext}`;
-  a.click();
-  URL.revokeObjectURL(url);
-});
-
-copyAllCropsBtn.addEventListener('click', async () => {
-  if (!lastResult?.data?.crops?.length) return;
-  const first = lastResult.data.crops[0];
-  if (!first?.url) return;
-  await copyImageToClipboard(first.url);
-  setStatus('最初の切り出し画像をコピーしました。');
-});
-
-downloadAllCropsBtn.addEventListener('click', () => {
-  if (!lastResult?.data?.crops?.length) return;
-  lastResult.data.crops.forEach((crop, index) => {
-    if (!crop?.url) return;
-    const ext = inferExtensionFromDataUrl(crop.url, 'png');
-    const label = crop.name || `crop-${index + 1}`;
-    downloadDataUrl(crop.url, `${lastResult.filename}-${label}.${ext}`);
-  });
-});
-
-copyBoundingBtn.addEventListener('click', async () => {
-  if (!lastResult?.data?.bounding_image_url) return;
-  await copyImageToClipboard(lastResult.data.bounding_image_url);
-  setStatus('バウンディング画像をコピーしました。');
-});
-
-downloadBoundingBtn.addEventListener('click', () => {
-  if (!lastResult?.data?.bounding_image_url) return;
-  const ext = inferExtensionFromDataUrl(lastResult.data.bounding_image_url, 'jpg');
-  downloadDataUrl(lastResult.data.bounding_image_url, `${lastResult.filename}-bounding.${ext}`);
-});
-
-boundingImage.addEventListener('click', () => {
-  if (!lastResult?.data?.bounding_image_url) return;
-  openModal({ type: 'bounding', url: lastResult.data.bounding_image_url });
-});
 
 modalClose.addEventListener('click', closeModal);
 modal.addEventListener('click', (e) => {
@@ -1027,6 +1518,10 @@ async function uploadFile(item) {
   const promptValue = promptInput?.value?.trim();
   if (promptValue) {
     formData.append('prompt', promptValue);
+  }
+  const models = getSelectedModels();
+  if (models.length) {
+    formData.append('models', models.join(','));
   }
 
   try {
@@ -1193,6 +1688,9 @@ async function deleteHistoryEntry(id, filename) {
   }
 }
 
+loadStoredModelSelection();
+updateModelInfo();
+fetchModels();
 clearResults();
 setTab('markdown');
 pingServer();

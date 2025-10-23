@@ -49,7 +49,8 @@ RUN pip install --no-cache-dir \
         Pillow \
         numpy \
         tqdm \
-        accelerate && \
+        accelerate \
+        yomitoku>=0.8.0 && \
     pip install --no-cache-dir flash-attn==2.7.3 --no-build-isolation
 
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \

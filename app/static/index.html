@@ -20,7 +20,6 @@
         <div class="container">
           <header>
             <h1>DeepSeek OCR Web</h1>
-            <div class="metadata" id="model-info">モデル初期化待機中…</div>
           </header>
 
           <section class="uploader" id="drop-zone">
@@ -48,6 +47,12 @@
         <div class="progress-bar" id="progress-bar"></div>
       </div>
 
+          <section class="section models-section" id="models-section">
+            <h2>使用モデル</h2>
+            <div class="model-options" id="model-options"></div>
+            <div class="metadata" id="model-info">モデル初期化待機中…</div>
+          </section>
+
           <section class="section hidden" id="input-preview-section">
             <h2>入力画像</h2>
             <div class="preview-grid" id="input-preview-grid"></div>
@@ -60,45 +65,17 @@
                 <button data-mode="markdown" class="active" id="tab-markdown">マークダウン</button>
                 <button data-mode="plain" id="tab-plain">プレーン</button>
               </div>
-              <div class="action-buttons">
-                <button class="icon-button" id="copy-text" title="コピー">
-                  <svg><use href="#icon-copy" /></svg>
-                </button>
-                <button class="icon-button" id="download-text" title="ダウンロード">
-                  <svg><use href="#icon-download" /></svg>
-                </button>
-              </div>
-              <div id="markdown-panel">
-                <div id="markdown-render"></div>
-              </div>
-              <textarea class="output hidden" id="plain-text" readonly></textarea>
-              <div class="metadata" id="metadata-panel"></div>
+              <div class="variant-grid" id="text-variant-grid"></div>
             </section>
 
             <section class="section">
               <h2>切り出し画像</h2>
-              <div class="action-buttons" id="crop-actions" hidden>
-                <button class="icon-button" id="copy-all-crops" title="切り出し画像をコピー">
-                  <svg><use href="#icon-copy" /></svg>
-                </button>
-                <button class="icon-button" id="download-all-crops" title="切り出し画像を一括DL">
-                  <svg><use href="#icon-download" /></svg>
-                </button>
-              </div>
-              <div class="crops-grid" id="crops-grid"></div>
+              <div class="variant-grid" id="crops-variant-grid"></div>
             </section>
 
             <section class="section">
               <h2>バウンディング画像</h2>
-              <div class="action-buttons" id="bounding-actions" hidden>
-                <button class="icon-button" id="copy-bounding" title="バウンディング画像をコピー">
-                  <svg><use href="#icon-copy" /></svg>
-                </button>
-                <button class="icon-button" id="download-bounding" title="バウンディング画像をDL">
-                  <svg><use href="#icon-download" /></svg>
-                </button>
-              </div>
-              <img id="bounding-image" class="bounding-image" alt="Bounding boxes" />
+              <div class="variant-grid" id="bounding-variant-grid"></div>
             </section>
           </div>
         </div>
