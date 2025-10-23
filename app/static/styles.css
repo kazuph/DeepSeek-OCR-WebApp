@@ -35,6 +35,11 @@ body {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  height: 100vh;
+  max-height: 100vh;
+  position: sticky;
+  top: 0;
+  overflow: hidden;
 }
 
 .history-header {
@@ -49,6 +54,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  padding-right: 4px;
 }
 
 .history-item {
@@ -142,9 +148,9 @@ h1 {
 .uploader {
   border: 2px dashed #3f51b5;
   border-radius: 12px;
-  padding: 32px;
+  padding: 20px 24px;
   text-align: center;
-  margin-bottom: 24px;
+  margin-bottom: 20px;
   background: rgba(63, 81, 181, 0.08);
   transition: border-color 0.2s ease, background 0.2s ease;
 }
@@ -197,6 +203,130 @@ h1 {
   flex-direction: column;
   gap: 8px;
   margin-bottom: 16px;
+}
+
+.progress-wrapper {
+  width: 100%;
+  height: 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+  margin-bottom: 20px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  transition: opacity 0.3s ease;
+}
+
+.progress-wrapper.hidden {
+  opacity: 0;
+  height: 0;
+  border-width: 0;
+  margin-bottom: 0;
+}
+
+.progress-bar {
+  width: 0;
+  height: 100%;
+  background: linear-gradient(90deg, #3f51b5, #ff9800);
+  transition: width 0.35s ease;
+}
+
+.prompt-section {
+  margin-bottom: 18px;
+}
+
+.prompt-section details {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 10px;
+  padding: 12px 16px;
+}
+
+.prompt-section summary {
+  font-weight: 600;
+  cursor: pointer;
+  outline: none;
+}
+
+.prompt-input {
+  width: 100%;
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, 0.35);
+  color: inherit;
+  resize: vertical;
+  min-height: 110px;
+  font-size: 14px;
+}
+
+.prompt-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 10px;
+}
+
+.preview-grid {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 140px;
+  grid-template-rows: repeat(2, 134px);
+  gap: 10px;
+  align-items: start;
+  max-height: 278px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.preview-item {
+  position: relative;
+  width: 130px;
+  height: 134px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.preview-thumb {
+  width: 100%;
+  height: 100px;
+  object-fit: cover;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(0, 0, 0, 0.25);
+  cursor: zoom-in;
+}
+
+.preview-label {
+  font-size: 11px;
+  text-align: center;
+  opacity: 0.8;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.preview-badge {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  font-size: 11px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(255, 152, 0, 0.8);
+  color: #111;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.preview-item[data-status="完了"] .preview-badge {
+  background: rgba(76, 175, 80, 0.8);
+  color: #061306;
+}
+
+.preview-item[data-status="失敗"] .preview-badge {
+  background: rgba(244, 67, 54, 0.82);
+  color: #fff4f4;
 }
 
 .queue-item {
@@ -426,14 +556,5 @@ textarea.output {
 @media (max-width: 1100px) {
   .layout {
     flex-direction: column;
-  }
-  .history-panel {
-    width: 100%;
-    border-left: none;
-    border-top: 1px solid rgba(255, 255, 255, 0.1);
-    max-height: 280px;
-  }
-  .history-list {
-    max-height: 220px;
   }
 }

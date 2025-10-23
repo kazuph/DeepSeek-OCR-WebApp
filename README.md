@@ -3,6 +3,22 @@
 <!-- markdownlint-disable no-duplicate-header -->
 
 
+## Web UI クイックスタート（Docker）
+
+1. このリポジトリをクローンし、GPU ドライバと Docker + NVIDIA Container Toolkit がセットアップされたホストで作業してください。
+2. コンテナをビルドして起動します。
+
+   ```bash
+   DOCKER_BUILDKIT=1 COMPOSE_DOCKER_CLI_BUILD=1 docker compose up -d --build
+   # エイリアス dcub を利用している場合:
+   DOCKER_BUILDKIT=1 COMPOSE_DOCKER_CLI_BUILD=1 dcub -d
+   ```
+
+3. 初回起動時はモデルと依存関係のダウンロードに時間が掛かります。完了すると `uvicorn` が `0.0.0.0:8080` で待機します。
+4. 同一ネットワーク上のブラウザから `http://<サーバーホスト名または tailscale ホスト名>:8080/` にアクセスしてください。
+5. OCR 解析結果や履歴は `/workspace/web_history` に保存されます。必要に応じてバックアップ・クリーンアップを行ってください。
+
+
 <div align="center">
   <img src="assets/logo.svg" width="60%" alt="DeepSeek AI" />
 </div>

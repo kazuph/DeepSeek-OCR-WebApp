@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -47,13 +47,18 @@ async def ping() -> dict[str, str]:
 
 
 @app.post("/api/ocr")
-async def ocr_endpoint(file: UploadFile = File(...)) -> dict[str, object]:
+async def ocr_endpoint(
+    file: UploadFile = File(...),
+    prompt: str | None = Form(default=None),
+) -> dict[str, object]:
     content = await file.read()
     if not content:
         raise HTTPException(status_code=400, detail="Empty upload")
 
     try:
-        result = run_ocr_bytes(content, file.filename or "upload.png")
+        prompt_value = (prompt or "").strip() or None
+        kwargs = {"prompt": prompt_value} if prompt_value else {}
+        result = run_ocr_bytes(content, file.filename or "upload.png", **kwargs)
     except Exception as exc:  # noqa: BLE001 - surface to client
         raise HTTPException(status_code=500, detail=f"OCR failed: {exc}") from exc
 

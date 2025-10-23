@@ -7,7 +7,10 @@
     <link rel="stylesheet" href="/static/styles.css" />
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
     <link rel="preload" href="/static/icons.svg" as="image" type="image/svg+xml" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css" />
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js" defer></script>
+    <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js" defer></script>
+    <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" defer></script>
     <script type="module" src="/static/main.js" defer></script>
   </head>
   <body>
@@ -29,9 +32,26 @@
             </label>
           </section>
 
+          <section class="section prompt-section" id="prompt-section">
+            <details>
+              <summary>OCRプロンプト</summary>
+              <textarea id="prompt-input" class="prompt-input" rows="4"><image>
+<|grounding|>Convert the document to markdown.</textarea>
+              <div class="prompt-actions">
+                <button type="button" class="button secondary mini" id="prompt-reset">既定に戻す</button>
+              </div>
+            </details>
+          </section>
+
       <div class="status" id="status"></div>
-      <div class="queue" id="queue-status"></div>
-      <div class="queue-list" id="queue-list"></div>
+      <div class="progress-wrapper hidden" id="progress-wrapper" aria-hidden="true">
+        <div class="progress-bar" id="progress-bar"></div>
+      </div>
+
+          <section class="section hidden" id="input-preview-section">
+            <h2>入力画像</h2>
+            <div class="preview-grid" id="input-preview-grid"></div>
+          </section>
 
           <div class="results">
             <section class="section full-width">
@@ -48,11 +68,10 @@
                   <svg><use href="#icon-download" /></svg>
                 </button>
               </div>
-          <textarea class="output hidden" id="plain-text" readonly></textarea>
-              <div id="markdown-panel" class="hidden">
-                <textarea class="output" id="markdown-raw" readonly></textarea>
+              <div id="markdown-panel">
                 <div id="markdown-render"></div>
               </div>
+              <textarea class="output hidden" id="plain-text" readonly></textarea>
               <div class="metadata" id="metadata-panel"></div>
             </section>
 

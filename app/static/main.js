@@ -6,7 +6,6 @@ const queueStatus = document.getElementById('queue-status');
 const queueListEl = document.getElementById('queue-list');
 const plainText = document.getElementById('plain-text');
 const markdownPanel = document.getElementById('markdown-panel');
-const markdownRaw = document.getElementById('markdown-raw');
 const markdownRender = document.getElementById('markdown-render');
 const cropsGrid = document.getElementById('crops-grid');
 const boundingImage = document.getElementById('bounding-image');
@@ -28,6 +27,15 @@ const modalCopyBtn = document.getElementById('modal-copy');
 const modalDownloadBtn = document.getElementById('modal-download');
 const historyListEl = document.getElementById('history-list');
 const iconSpriteContainer = document.getElementById('icon-sprite');
+const inputPreviewSection = document.getElementById('input-preview-section');
+const inputPreviewGrid = document.getElementById('input-preview-grid');
+const promptInput = document.getElementById('prompt-input');
+const promptResetBtn = document.getElementById('prompt-reset');
+const defaultPrompt = promptInput?.defaultValue || '';
+const progressWrapper = document.getElementById('progress-wrapper');
+const progressBar = document.getElementById('progress-bar');
+const MAX_PREVIEW_COLUMNS = 5;
+const MAX_PREVIEW_ROWS = 2;
 
 let currentTextMode = 'markdown';
 let processing = false;
@@ -37,6 +45,11 @@ let lastResult = null;
 let modalContext = null;
 let historyEntries = [];
 let activeHistoryId = null;
+const inputPreviews = [];
+let progressTimer = null;
+let progressValue = 0;
+let progressSession = 0;
+let activeProgressSession = 0;
 
 async function pingServer() {
   try {
@@ -54,6 +67,167 @@ function setStatus(message, isError = false) {
   statusEl.style.color = isError ? '#ff6b6b' : '#cfd8dc';
 }
 
+function showProgress() {
+  if (!progressWrapper || !progressBar) return;
+  progressWrapper.classList.remove('hidden');
+  progressWrapper.setAttribute('aria-hidden', 'false');
+}
+
+function hideProgress(force = false) {
+  if (!progressWrapper || !progressBar) return;
+  if (!force && processing) return;
+  progressWrapper.classList.add('hidden');
+  progressWrapper.setAttribute('aria-hidden', 'true');
+  progressBar.style.width = '0%';
+  progressValue = 0;
+  if (force) {
+    activeProgressSession = 0;
+  }
+}
+
+function startFakeProgress() {
+  if (!progressWrapper || !progressBar) return 0;
+  if (progressTimer) {
+    clearInterval(progressTimer);
+    progressTimer = null;
+  }
+  progressValue = 0;
+  progressBar.style.width = '0%';
+  showProgress();
+  progressSession += 1;
+  activeProgressSession = progressSession;
+  const sessionId = progressSession;
+
+  progressTimer = setInterval(() => {
+    const target = progressValue < 55
+      ? progressValue + (Math.random() * 6 + 3)
+      : progressValue < 80
+        ? progressValue + (Math.random() * 4 + 1)
+        : progressValue + (Math.random() * 1.2 + 0.1);
+    progressValue = Math.min(target, 95);
+    progressBar.style.width = `${progressValue.toFixed(1)}%`;
+  }, 400);
+
+  return sessionId;
+}
+
+function settleProgress(sessionId, success) {
+  if (!progressWrapper || !progressBar) return;
+  if (sessionId === 0 || sessionId !== activeProgressSession) {
+    return;
+  }
+  if (progressTimer) {
+    clearInterval(progressTimer);
+    progressTimer = null;
+  }
+  progressValue = success ? 100 : Math.max(progressValue, 98);
+  progressBar.style.width = `${progressValue}%`;
+  const delay = success ? 500 : 1200;
+  setTimeout(() => {
+    if (sessionId === activeProgressSession) {
+      hideProgress(true);
+    }
+  }, delay);
+}
+
+function findPreview(id) {
+  return inputPreviews.find((entry) => entry.id === id);
+}
+
+function pruneInputPreviews() {
+  const activeIds = new Set();
+  if (currentItem) {
+    activeIds.add(currentItem.id);
+  }
+  queue.forEach((item) => activeIds.add(item.id));
+
+  while (inputPreviews.length > 12) {
+    const removableIndex = inputPreviews.findIndex((entry) => !activeIds.has(entry.id));
+    if (removableIndex === -1) {
+      break;
+    }
+    const [removed] = inputPreviews.splice(removableIndex, 1);
+    if (removed?.url) {
+      URL.revokeObjectURL(removed.url);
+    }
+  }
+}
+
+function renderPreviews() {
+  if (!inputPreviewSection || !inputPreviewGrid) return;
+  pruneInputPreviews();
+
+  const items = [...inputPreviews].sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
+  const visibleItems = items.slice(0, MAX_PREVIEW_COLUMNS * MAX_PREVIEW_ROWS);
+  const hasItems = visibleItems.length > 0;
+  inputPreviewSection.classList.toggle('hidden', !hasItems);
+
+  if (!hasItems) {
+    inputPreviewGrid.innerHTML = '';
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+
+  visibleItems.forEach((entry, index) => {
+    const item = document.createElement('div');
+    item.className = 'preview-item';
+    item.dataset.status = entry.status;
+
+    const columnIndex = (index % MAX_PREVIEW_COLUMNS) + 1;
+    const rowIndex = Math.floor(index / MAX_PREVIEW_COLUMNS) + 1;
+    item.style.gridColumn = String(columnIndex);
+    item.style.gridRow = String(rowIndex);
+
+    if (entry.status) {
+      const badge = document.createElement('span');
+      badge.className = 'preview-badge';
+      badge.textContent = entry.status;
+      item.appendChild(badge);
+    }
+
+    const img = document.createElement('img');
+    img.src = entry.url;
+    img.alt = `${entry.name} プレビュー`;
+    img.className = 'preview-thumb';
+    img.addEventListener('click', () => {
+      openModal({ type: 'input', url: entry.url, name: entry.name });
+    });
+    item.appendChild(img);
+
+    const label = document.createElement('div');
+    label.className = 'preview-label';
+    label.textContent = entry.name;
+    item.appendChild(label);
+
+    fragment.appendChild(item);
+  });
+
+  inputPreviewGrid.innerHTML = '';
+  inputPreviewGrid.appendChild(fragment);
+}
+
+function addInputPreview({ id, name, url, status }) {
+  if (!id || !url) return;
+  const existing = findPreview(id);
+  if (existing) {
+    existing.status = status;
+    existing.name = name;
+    renderPreviews();
+    return;
+  }
+
+  inputPreviews.push({ id, name, url, status, addedAt: Date.now() });
+  renderPreviews();
+}
+
+function updatePreviewStatus(id, status) {
+  const entry = findPreview(id);
+  if (!entry) return;
+  entry.status = status;
+  renderPreviews();
+}
+
 function formatDate(value) {
   if (!value) return '-';
   const date = new Date(value);
@@ -61,6 +235,38 @@ function formatDate(value) {
     return value;
   }
   return date.toLocaleString();
+}
+
+function renderMath(container, attempt = 0) {
+  if (!container) {
+    return;
+  }
+
+  const renderFn = window.renderMathInElement;
+  if (typeof renderFn === 'function') {
+    try {
+      renderFn(container, {
+        delimiters: [
+          { left: '$$', right: '$$', display: true },
+          { left: '\\[', right: '\\]', display: true },
+          { left: '\\(', right: '\\)', display: false },
+          { left: '$', right: '$', display: false },
+        ],
+        throwOnError: false,
+        strict: 'ignore',
+      });
+    } catch (error) {
+      console.error('Failed to render math', error);
+    }
+    return;
+  }
+
+  if (attempt >= 20) {
+    console.warn('KaTeX auto-render not ready after retries');
+    return;
+  }
+
+  setTimeout(() => renderMath(container, attempt + 1), 200);
 }
 
 function transformMarkdown(markdown, crops) {
@@ -98,8 +304,9 @@ function transformMarkdown(markdown, crops) {
 
 function clearResults() {
   closeModal();
-  plainText.value = '';
-  markdownRaw.value = '';
+  if (plainText) {
+    plainText.value = '';
+  }
   markdownRender.innerHTML = '';
   cropsGrid.innerHTML = '<p>切り出し画像はまだありません。</p>';
   boundingImage.src = '';
@@ -111,14 +318,11 @@ function clearResults() {
 }
 
 function updateQueueStatus() {
-  if (processing) {
-    queueStatus.textContent = `処理中: ${currentItem?.name || '---'} / 残り ${queue.length} 件`;
-  } else if (queue.length > 0) {
-    queueStatus.textContent = `待機中: ${queue.length} 件`;
-  } else {
+  if (queueStatus) {
     queueStatus.textContent = '';
   }
   renderQueue();
+  renderPreviews();
 }
 
 function inferExtensionFromDataUrl(source, fallback = 'png') {
@@ -171,14 +375,16 @@ function displayResult(data, filename, historyId = null, createdAt = null) {
   const firstDisplay = !lastResult;
   lastResult = { data, filename, historyId, createdAt };
 
-  plainText.value = data.text_plain || '';
+  if (plainText) {
+    plainText.value = data.text_plain || '';
+  }
   const markdownText = data.text_markdown || '';
   const cropList = Array.isArray(data.crops) ? data.crops.filter((crop) => crop && crop.url) : [];
   const processedMarkdown = transformMarkdown(markdownText, cropList);
-  markdownRaw.value = markdownText;
   markdownRender.innerHTML = processedMarkdown
     ? window.marked.parse(processedMarkdown)
     : '<p>マークダウン出力はありません。</p>';
+  renderMath(markdownRender);
 
   if (cropList.length > 0) {
     cropsGrid.innerHTML = '';
@@ -225,11 +431,16 @@ function handleFiles(files) {
     return;
   }
   Array.from(files).forEach((file) => {
+    const id = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+    const name = file.name || `upload-${Date.now()}`;
+    const previewUrl = URL.createObjectURL(file);
     queue.push({
-      id: `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+      id,
       file,
-      name: file.name || `upload-${Date.now()}`,
+      name,
+      previewUrl,
     });
+    addInputPreview({ id, name, url: previewUrl, status: '待機中' });
   });
   updateQueueStatus();
   processQueue();
@@ -241,10 +452,18 @@ async function processQueue() {
   }
   processing = true;
   currentItem = queue.shift() || null;
+  if (currentItem?.id) {
+    updatePreviewStatus(currentItem.id, '処理中');
+  }
+  const sessionId = startFakeProgress();
   updateQueueStatus();
 
   if (currentItem) {
-    await uploadFile(currentItem);
+    const success = await uploadFile(currentItem);
+    if (currentItem.id) {
+      updatePreviewStatus(currentItem.id, success ? '完了' : '失敗');
+    }
+    settleProgress(sessionId, success);
   }
 
   processing = false;
@@ -285,11 +504,16 @@ window.addEventListener('paste', (event) => {
     if (item.kind === 'file') {
       const file = item.getAsFile();
       if (file) {
+        const id = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+        const name = file.name || `paste-${Date.now()}`;
+        const previewUrl = URL.createObjectURL(file);
         queue.push({
-          id: `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+          id,
           file,
-          name: file.name || `paste-${Date.now()}`,
+          name,
+          previewUrl,
         });
+        addInputPreview({ id, name, url: previewUrl, status: '待機中' });
       }
     }
   }
@@ -302,12 +526,16 @@ function setTab(mode) {
   if (mode === 'plain') {
     tabPlain.classList.add('active');
     tabMarkdown.classList.remove('active');
-    plainText.classList.remove('hidden');
+    if (plainText) {
+      plainText.classList.remove('hidden');
+    }
     markdownPanel.classList.add('hidden');
   } else {
     tabPlain.classList.remove('active');
     tabMarkdown.classList.add('active');
-    plainText.classList.add('hidden');
+    if (plainText) {
+      plainText.classList.add('hidden');
+    }
     markdownPanel.classList.remove('hidden');
   }
 }
@@ -316,7 +544,12 @@ tabPlain.addEventListener('click', () => setTab('plain'));
 tabMarkdown.addEventListener('click', () => setTab('markdown'));
 
 copyTextBtn.addEventListener('click', () => {
-  const text = currentTextMode === 'plain' ? plainText.value : markdownRaw.value;
+  let text = '';
+  if (currentTextMode === 'plain') {
+    text = plainText?.value || '';
+  } else if (lastResult?.data?.text_markdown) {
+    text = lastResult.data.text_markdown;
+  }
   if (text) {
     navigator.clipboard.writeText(text).then(() => setStatus('テキストをコピーしました。'));
   }
@@ -324,7 +557,7 @@ copyTextBtn.addEventListener('click', () => {
 
 downloadTextBtn.addEventListener('click', () => {
   const isPlain = currentTextMode === 'plain';
-  const text = isPlain ? plainText.value : markdownRaw.value;
+  const text = isPlain ? (plainText?.value || '') : (lastResult?.data?.text_markdown || '');
   if (!text) {
     return;
   }
@@ -392,10 +625,28 @@ modalCopyBtn.addEventListener('click', async () => {
 
 modalDownloadBtn.addEventListener('click', () => {
   if (!modalContext) return;
-  const ext = inferExtensionFromDataUrl(modalContext.url);
-  const suffix = modalContext.type === 'crop' ? `crop-${modalContext.index + 1}` : 'bounding';
-  const name = `${lastResult?.filename || 'ocr'}-${suffix}.${ext}`;
-  downloadDataUrl(modalContext.url, name);
+  let filename = 'ocr-output';
+
+  if (modalContext.type === 'crop') {
+    const ext = inferExtensionFromDataUrl(modalContext.url, 'png');
+    const suffix = typeof modalContext.index === 'number' ? `crop-${modalContext.index + 1}` : 'crop';
+    const base = lastResult?.filename || modalContext.name || 'ocr';
+    filename = `${base}-${suffix}.${ext}`;
+  } else if (modalContext.type === 'bounding') {
+    const ext = inferExtensionFromDataUrl(modalContext.url, 'jpg');
+    const base = lastResult?.filename || modalContext.name || 'ocr';
+    filename = `${base}-bounding.${ext}`;
+  } else if (modalContext.type === 'input') {
+    filename = modalContext.name || 'input-image';
+    if (!/\.[a-z0-9]+$/i.test(filename)) {
+      filename = `${filename}.png`;
+    }
+  } else {
+    const ext = inferExtensionFromDataUrl(modalContext.url, 'png');
+    filename = `${lastResult?.filename || 'ocr'}-${modalContext.type || 'image'}.${ext}`;
+  }
+
+  downloadDataUrl(modalContext.url, filename);
 });
 
 function downloadDataUrl(dataUrl, filename) {
@@ -481,6 +732,10 @@ async function uploadFile(item) {
   setStatus(`${item.name} を解析中…`);
   const formData = new FormData();
   formData.append('file', item.file);
+  const promptValue = promptInput?.value?.trim();
+  if (promptValue) {
+    formData.append('prompt', promptValue);
+  }
 
   try {
     const response = await fetch('/api/ocr', {
@@ -500,9 +755,11 @@ async function uploadFile(item) {
     }
     await fetchHistory(false);
     setStatus(`${item.name} の解析が完了しました。`);
+    return true;
   } catch (error) {
     console.error(error);
     setStatus(`${item.name} の解析に失敗しました: ${error.message}`, true);
+    return false;
   }
 }
 
@@ -650,3 +907,10 @@ pingServer();
 updateQueueStatus();
 fetchHistory();
 loadIcons();
+
+if (promptResetBtn && promptInput) {
+  promptResetBtn.addEventListener('click', () => {
+    promptInput.value = defaultPrompt;
+    setStatus('プロンプトを既定に戻しました。');
+  });
+}
