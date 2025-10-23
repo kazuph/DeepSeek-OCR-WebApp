@@ -51,6 +51,20 @@ let progressValue = 0;
 let progressSession = 0;
 let activeProgressSession = 0;
 
+function sanitizeMathContent(source) {
+  if (!source) {
+    return source;
+  }
+
+  const normalized = source.replace(/\\n/g, '\n');
+  const placeholder = '\uFFF0';
+  return normalized.replace(/\\text\{([^{}]*)\}/g, (match, inner) => {
+    const preserved = inner.replace(/\\_/g, placeholder);
+    const escaped = preserved.replace(/_/g, '\\_').replace(new RegExp(placeholder, 'g'), '\\_');
+    return `\\text{${escaped}}`;
+  });
+}
+
 async function pingServer() {
   try {
     const res = await fetch('/api/ping');
@@ -242,6 +256,8 @@ function renderMath(container, attempt = 0) {
     return;
   }
 
+  fallbackMathRender(container);
+
   const renderFn = window.renderMathInElement;
   if (typeof renderFn === 'function') {
     try {
@@ -269,9 +285,257 @@ function renderMath(container, attempt = 0) {
   setTimeout(() => renderMath(container, attempt + 1), 200);
 }
 
-function transformMarkdown(markdown, crops) {
-  if (!markdown || !Array.isArray(crops) || !crops.length) {
+function normalizeMathBlocks(markdown) {
+  if (!markdown) {
     return markdown;
+  }
+
+  const pattern = /(^|\r?\n)([ \t]*)\[\s*([\s\S]*?)\s*\](?=\r?\n|$)/g;
+  return markdown.replace(pattern, (match, prefix, indent, content) => {
+    if (!content || !/\\/.test(content)) {
+      return match;
+    }
+
+    const trimmed = content.trim();
+    if (!trimmed) {
+      return match;
+    }
+
+    const cleaned = sanitizeMathContent(trimmed);
+    return `${prefix}${indent}\\[\n${cleaned}\n${indent}\\]`;
+  });
+}
+
+function normalizeMathNodes(container) {
+  if (!container) {
+    return;
+  }
+
+  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+
+  while (walker.nextNode()) {
+    const node = walker.currentNode;
+    if (!node || !node.textContent) {
+      continue;
+    }
+
+    let parent = node.parentNode;
+    let skip = false;
+    while (parent) {
+      if (parent.nodeType === Node.ELEMENT_NODE && ['CODE', 'PRE', 'TEXTAREA'].includes(parent.tagName)) {
+        skip = true;
+        break;
+      }
+      parent = parent.parentNode;
+    }
+    if (skip) {
+      continue;
+    }
+
+    const text = node.textContent;
+    if (!text || (!text.includes('[') && !text.includes(']'))) {
+      continue;
+    }
+
+    const leading = text.match(/^\s*/)?.[0] ?? '';
+    const trailing = text.match(/\s*$/)?.[0] ?? '';
+    const trimmed = text.slice(leading.length, text.length - trailing.length);
+
+    if (!trimmed.startsWith('[') || !trimmed.endsWith(']')) {
+      continue;
+    }
+    if (trimmed.startsWith('\\[') || trimmed.startsWith('$$')) {
+      continue;
+    }
+
+    const inner = sanitizeMathContent(trimmed.slice(1, -1).trim());
+    if (!inner || !inner.includes('\\')) {
+      continue;
+    }
+
+    const newline = text.includes('\r\n') ? '\r\n' : '\n';
+    node.textContent = `${leading}\\[${newline}${inner}${newline}\\]${trailing}`;
+  }
+}
+
+function normalizeMathElements(container) {
+  if (!container) {
+    return;
+  }
+
+  const elements = container.querySelectorAll('p, div');
+  elements.forEach((element) => {
+    const text = element.textContent;
+    if (!text) {
+      return;
+    }
+
+    const trimmed = text.trim();
+    if (trimmed.length < 4 || !trimmed.endsWith(']') || !trimmed.includes('\\')) {
+      return;
+    }
+
+    let body = trimmed;
+    if (body.startsWith('\\[') && body.endsWith('\\]')) {
+      body = body.slice(2, -2).trim();
+    } else if (body.startsWith('[') && body.endsWith(']')) {
+      body = body.slice(1, -1).trim();
+    } else {
+      return;
+    }
+
+    if (!body) {
+      return;
+    }
+
+    const newline = text.includes('\r\n') ? '\r\n' : '\n';
+    const cleaned = sanitizeMathContent(body);
+    element.textContent = `\\[${newline}${cleaned}${newline}\\]`;
+  });
+}
+
+function fallbackMathRender(container) {
+  if (!container) {
+    return;
+  }
+
+  const katexLib = window.katex;
+  if (!katexLib || typeof katexLib.renderToString !== 'function') {
+    return;
+  }
+
+  const doc = container.ownerDocument;
+  const walker = doc.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+
+  while (walker.nextNode()) {
+    nodes.push(walker.currentNode);
+  }
+
+  nodes.forEach((node) => {
+    if (!node?.textContent) {
+      return;
+    }
+
+    const parentElement = node.parentElement;
+    if (!parentElement) {
+      return;
+    }
+
+    if (parentElement.closest('code, pre, textarea, script, style') || parentElement.closest('.katex')) {
+      return;
+    }
+
+    const text = node.textContent;
+    if (!text) {
+      return;
+    }
+
+    const hasExplicitDelim = text.includes('\\[') || text.includes('\\(');
+    if (!hasExplicitDelim) {
+      const trimmedCheck = text.trim();
+      if (!(trimmedCheck.startsWith('[') && trimmedCheck.endsWith(']') && trimmedCheck.includes('\\'))) {
+        return;
+      }
+    }
+
+    const regex = /\\\[([\s\S]*?)\\\]|\\\(([^]*?)\\\)/g;
+    let match;
+    let lastIndex = 0;
+    const fragments = [];
+
+    while ((match = regex.exec(text)) !== null) {
+      const matchStart = match.index;
+      if (matchStart > lastIndex) {
+        fragments.push({ type: 'text', value: text.slice(lastIndex, matchStart) });
+      }
+
+      const matchText = match[0];
+      const content = (match[1] ?? match[2] ?? '').trim();
+      const displayMode = match[1] !== undefined;
+      fragments.push({ type: 'math', raw: matchText, content, displayMode });
+      lastIndex = match.index + matchText.length;
+    }
+
+    if (fragments.length === 0) {
+      const trimmed = text.trim();
+      if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+        const inner = sanitizeMathContent(trimmed.slice(1, -1).trim());
+        if (inner && inner.includes('\\')) {
+          try {
+            const html = katexLib.renderToString(inner, {
+              displayMode: true,
+              throwOnError: false,
+              strict: 'ignore',
+            });
+            const temp = doc.createElement('div');
+            temp.innerHTML = html;
+            const frag = doc.createDocumentFragment();
+            while (temp.firstChild) {
+              frag.appendChild(temp.firstChild);
+            }
+            const parent = node.parentNode;
+            parent.insertBefore(frag, node);
+            parent.removeChild(node);
+          } catch (error) {
+            console.error('KaTeX fallback render failed', error);
+          }
+        }
+      }
+      return;
+    }
+
+    if (lastIndex < text.length) {
+      fragments.push({ type: 'text', value: text.slice(lastIndex) });
+    }
+
+    const parent = node.parentNode;
+    const reference = node;
+
+    fragments.forEach((fragment) => {
+      if (fragment.type === 'text') {
+        if (fragment.value) {
+          parent.insertBefore(doc.createTextNode(fragment.value), reference);
+        }
+        return;
+      }
+
+      const mathSource = sanitizeMathContent(fragment.content);
+      let html = fragment.raw;
+      if (mathSource) {
+        try {
+          html = katexLib.renderToString(mathSource, {
+            displayMode: fragment.displayMode,
+            throwOnError: false,
+            strict: 'ignore',
+          });
+        } catch (error) {
+          console.error('KaTeX fallback render failed', error);
+        }
+      }
+
+      const temp = doc.createElement('div');
+      temp.innerHTML = html;
+      const frag = doc.createDocumentFragment();
+      while (temp.firstChild) {
+        frag.appendChild(temp.firstChild);
+      }
+      parent.insertBefore(frag, reference);
+    });
+
+    parent.removeChild(node);
+  });
+}
+
+function transformMarkdown(markdown, crops) {
+  if (!markdown) {
+    return markdown;
+  }
+
+  let processed = normalizeMathBlocks(markdown);
+
+  if (!Array.isArray(crops) || !crops.length) {
+    return processed;
   }
 
   const replacements = new Map();
@@ -288,7 +552,7 @@ function transformMarkdown(markdown, crops) {
     replacements.set(`images/${index}.png`, crop.url);
   });
 
-  return markdown.replace(/!\[(.*?)\]\(([^)]+)\)/g, (match, alt, path) => {
+  return processed.replace(/!\[(.*?)\]\(([^)]+)\)/g, (match, alt, path) => {
     const key = path.trim();
     const direct = replacements.get(key);
     if (direct) {
@@ -384,6 +648,8 @@ function displayResult(data, filename, historyId = null, createdAt = null) {
   markdownRender.innerHTML = processedMarkdown
     ? window.marked.parse(processedMarkdown)
     : '<p>マークダウン出力はありません。</p>';
+  normalizeMathNodes(markdownRender);
+  normalizeMathElements(markdownRender);
   renderMath(markdownRender);
 
   if (cropList.length > 0) {
