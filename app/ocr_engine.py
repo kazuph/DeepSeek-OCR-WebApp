@@ -830,12 +830,16 @@ def _build_image_urls(
 
     bounding_url = None
     bounding_rel = variant_meta.get("bounding_image")
-    if bounding_rel:
+    bounding_rel_str = str(bounding_rel) if bounding_rel else None
+    if bounding_rel_str:
         bounding_url = _append_model_query(f"{base_url}/image/bounding", variant_key)
 
+    raw_crop_paths = [str(rel_path) for rel_path in variant_meta.get("crops", [])]
+    crop_path_set = set(raw_crop_paths)
+    crop_name_set = {Path(rel_str).name for rel_str in raw_crop_paths}
+
     crops: List[dict[str, str]] = []
-    for rel_path in variant_meta.get("crops", []):
-        rel_str = str(rel_path)
+    for rel_str in raw_crop_paths:
         crop_url = f"{base_url}/image/crop/{quote(rel_str, safe='/')}"
         crop_url = _append_model_query(crop_url, variant_key)
         crops.append(
@@ -850,8 +854,14 @@ def _build_image_urls(
     preview_url = None
     if preview_rel:
         preview_str = str(preview_rel)
-        preview_url = f"{base_url}/image/crop/{quote(preview_str, safe='/')}"
-        preview_url = _append_model_query(preview_url, variant_key)
+        preview_name = Path(preview_str).name
+        if bounding_rel_str and Path(preview_str) == Path(bounding_rel_str):
+            preview_url = bounding_url
+        elif preview_str in crop_path_set or preview_name in crop_name_set:
+            preview_url = f"{base_url}/image/crop/{quote(preview_str, safe='/')}"
+            preview_url = _append_model_query(preview_url, variant_key)
+        else:
+            preview_url = bounding_url
 
     if preview_url is None:
         preview_url = bounding_url or (crops[0]["url"] if crops else None)
