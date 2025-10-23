@@ -58,10 +58,36 @@ function sanitizeMathContent(source) {
 
   const normalized = source.replace(/\\n/g, '\n');
   const placeholder = '\uFFF0';
-  return normalized.replace(/\\text\{([^{}]*)\}/g, (match, inner) => {
+  const escapedText = normalized.replace(/\\text\{([^{}]*)\}/g, (match, inner) => {
     const preserved = inner.replace(/\\_/g, placeholder);
     const escaped = preserved.replace(/_/g, '\\_').replace(new RegExp(placeholder, 'g'), '\\_');
     return `\\text{${escaped}}`;
+  });
+  return ensureDisplayMathLineBreaks(escapedText);
+}
+
+function ensureDisplayMathLineBreaks(math) {
+  if (!math || !/\\begin\{(align\*?|aligned|array|cases|matrix)/.test(math)) {
+    return math;
+  }
+
+  return math.replace(/\\begin\{(align\*?|aligned|array|cases|matrix)\}([\s\S]*?)\\end\{\1\}/g, (match, envName, body) => {
+    const lines = body.split('\n');
+    if (lines.length <= 1) {
+      return match;
+    }
+
+    const updated = lines.map((line, index) => {
+      if (index === lines.length - 1) {
+        return line;
+      }
+
+      return /\\\\\s*$/.test(line)
+        ? line
+        : `${line.replace(/\s*$/, '')} \\`;
+    }).join('\n');
+
+    return `\\begin{${envName}}${updated}\\end{${envName}}`;
   });
 }
 
