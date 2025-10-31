@@ -133,6 +133,7 @@ MODEL_DESCRIPTORS: List[ModelDescriptor] = [
 ]
 
 MODEL_DESCRIPTOR_MAP: Dict[str, ModelDescriptor] = {item.key: item for item in MODEL_DESCRIPTORS}
+MODEL_ORDER: Dict[str, int] = {descriptor.key: index for index, descriptor in enumerate(MODEL_DESCRIPTORS)}
 DEFAULT_MODEL_KEY = "deepseek"
 MODEL_EXECUTION_PRIORITY = {
     "yomitoku": 0,
@@ -814,6 +815,7 @@ def run_ocr_bytes(
     filename: str,
     *,
     models: Optional[Sequence[str] | str] = None,
+    history_id: Optional[str] = None,
     model_name: str = DEFAULT_MODEL_NAME,
     prompt: str = "<image>\n<|grounding|>Convert the document to markdown.",
     base_size: int = 1024,
@@ -880,8 +882,34 @@ def run_ocr_bytes(
             detail = "; ".join(variant_errors) or "All OCR models failed."
             raise RuntimeError(detail)
 
-        metadata = _persist_history_entry(variant_results, safe_name, image_bytes, input_path, warnings=variant_errors)
-        entry_id = metadata["id"]
+        metadata = None
+        entry_id: Optional[str] = None
+
+        if history_id:
+            try:
+                metadata = _append_history_entry(
+                    history_id,
+                    variant_results,
+                    safe_name,
+                    image_bytes,
+                    input_path,
+                    warnings=variant_errors,
+                )
+                entry_id = metadata.get("id", history_id)
+            except FileNotFoundError:
+                metadata = None
+                entry_id = None
+
+        if metadata is None:
+            metadata = _persist_history_entry(
+                variant_results,
+                safe_name,
+                image_bytes,
+                input_path,
+                warnings=variant_errors,
+            )
+            entry_id = metadata["id"]
+
         entry_dir = WEB_HISTORY_DIR / entry_id
         input_images = _build_input_images(entry_id, entry_dir)
 
@@ -944,89 +972,20 @@ def _persist_history_entry(
     entry_dir = WEB_HISTORY_DIR / entry_id
     entry_dir.mkdir(parents=True, exist_ok=True)
 
-    variant_entries: List[dict[str, object]] = []
-    for variant in variants:
-        descriptor = _descriptor_for(variant.key)
+    variant_entries = [_store_variant_entry(entry_dir, variant) for variant in variants]
 
-        variant_root = entry_dir / descriptor.key
-        if variant_root.exists():
-            shutil.rmtree(variant_root)
-        variant_root.mkdir(parents=True, exist_ok=True)
+    _ensure_input_snapshot(entry_dir, original_filename, original_bytes, source_path)
 
-        artifacts_target = variant_root / "artifacts"
-        shutil.copytree(variant.artifact_dir, artifacts_target)
-
-        texts_target = variant_root / "texts"
-        shutil.copytree(variant.text_path.parent, texts_target)
-
-        bounding_rel = None
-        if variant.bounding_image:
-            try:
-                rel = Path("artifacts") / variant.bounding_image.relative_to(variant.artifact_dir)
-            except ValueError:
-                rel = Path("artifacts") / variant.bounding_image.name
-            bounding_rel = rel.as_posix()
-
-        crop_rel_paths: List[str] = []
-        for crop_path in variant.crop_images:
-            try:
-                rel = Path("artifacts") / crop_path.relative_to(variant.artifact_dir)
-            except ValueError:
-                rel = Path("artifacts") / crop_path.name
-            crop_rel_paths.append(rel.as_posix())
-
-        preview_rel = None
-        if variant.preview_image:
-            try:
-                rel = Path("artifacts") / variant.preview_image.relative_to(variant.artifact_dir)
-            except ValueError:
-                rel = Path("artifacts") / variant.preview_image.name
-            preview_rel = rel.as_posix()
-
-        text_rel = Path("texts") / variant.text_path.relative_to(variant.text_path.parent)
-
-        variant_entries.append(
-            {
-                "model": descriptor.key,
-                "label": variant.label,
-                "text_plain": variant.text_plain,
-                "text_markdown": variant.text_markdown,
-                "bounding_image": bounding_rel,
-                "crops": crop_rel_paths,
-                "preview": variant.preview_text,
-                "preview_image": preview_rel,
-                "text_path": text_rel.as_posix(),
-                "extras": variant.extras or {},
-            }
-        )
-
-    input_target_dir = entry_dir / "input"
-    input_target_dir.mkdir(parents=True, exist_ok=True)
-    if source_path.exists():
-        shutil.copy(source_path, input_target_dir / source_path.name)
-    else:
-        (input_target_dir / original_filename).write_bytes(original_bytes)
-
-    created_at = datetime.utcnow().isoformat() + "Z"
-    primary_variant = variant_entries[0]
-    preview_text = _trim_preview(primary_variant.get("preview", ""))
-
-    metadata = {
-        "id": entry_id,
-        "filename": original_filename,
-        "created_at": created_at,
-        "variants": variant_entries,
-        "primary_model": primary_variant.get("model"),
-        "preview": preview_text,
-        "preview_image": primary_variant.get("preview_image"),
-        "models": [entry.get("model") for entry in variant_entries],
-        "text_plain": primary_variant.get("text_plain", ""),
-        "text_markdown": primary_variant.get("text_markdown", ""),
-        "bounding_image": primary_variant.get("bounding_image"),
-        "crops": primary_variant.get("crops", []),
-    }
+    warnings_list = None
     if warnings:
-        metadata["warnings"] = list(warnings)
+        warnings_list = [warning for warning in warnings if warning]
+
+    metadata = _compose_history_metadata(
+        entry_id,
+        original_filename,
+        variant_entries,
+        warnings=warnings_list,
+    )
 
     (entry_dir / "metadata.json").write_text(
         json.dumps(metadata, ensure_ascii=False, indent=2),
@@ -1124,6 +1083,169 @@ def _build_variant_response(entry_id: str, metadata: dict[str, object], variant_
         "metadata": variant_metadata,
         "elapsed_seconds": variant_metadata.get("elapsed_seconds") or extras.get("elapsed_seconds"),
     }
+
+
+def _sort_variant_entries(entries: List[dict[str, object]]) -> List[dict[str, object]]:
+    return sorted(
+        entries,
+        key=lambda entry: (
+            MODEL_ORDER.get(entry.get("model"), 999),
+            entry.get("model") or "",
+        ),
+    )
+
+
+def _store_variant_entry(entry_dir: Path, variant: OCRVariantArtifacts) -> dict[str, object]:
+    descriptor = _descriptor_for(variant.key)
+
+    variant_root = entry_dir / descriptor.key
+    if variant_root.exists():
+        shutil.rmtree(variant_root)
+    variant_root.mkdir(parents=True, exist_ok=True)
+
+    artifacts_target = variant_root / "artifacts"
+    shutil.copytree(variant.artifact_dir, artifacts_target)
+
+    texts_target = variant_root / "texts"
+    shutil.copytree(variant.text_path.parent, texts_target)
+
+    bounding_rel = None
+    if variant.bounding_image:
+        try:
+            rel = Path("artifacts") / variant.bounding_image.relative_to(variant.artifact_dir)
+        except ValueError:
+            rel = Path("artifacts") / variant.bounding_image.name
+        bounding_rel = rel.as_posix()
+
+    crop_rel_paths: List[str] = []
+    for crop_path in variant.crop_images:
+        try:
+            rel = Path("artifacts") / crop_path.relative_to(variant.artifact_dir)
+        except ValueError:
+            rel = Path("artifacts") / crop_path.name
+        crop_rel_paths.append(rel.as_posix())
+
+    preview_rel = None
+    if variant.preview_image:
+        try:
+            rel = Path("artifacts") / variant.preview_image.relative_to(variant.artifact_dir)
+        except ValueError:
+            rel = Path("artifacts") / variant.preview_image.name
+        preview_rel = rel.as_posix()
+
+    text_rel = Path("texts") / variant.text_path.relative_to(variant.text_path.parent)
+
+    return {
+        "model": descriptor.key,
+        "label": variant.label,
+        "text_plain": variant.text_plain,
+        "text_markdown": variant.text_markdown,
+        "bounding_image": bounding_rel,
+        "crops": crop_rel_paths,
+        "preview": variant.preview_text,
+        "preview_image": preview_rel,
+        "text_path": text_rel.as_posix(),
+        "extras": variant.extras or {},
+    }
+
+
+def _compose_history_metadata(
+    entry_id: str,
+    filename: str,
+    variant_entries: List[dict[str, object]],
+    *,
+    created_at: Optional[str] = None,
+    warnings: Optional[Iterable[str]] = None,
+) -> dict[str, object]:
+    if not variant_entries:
+        raise ValueError("No variant entries to persist")
+
+    ordered_entries = _sort_variant_entries(variant_entries)
+    primary = ordered_entries[0]
+
+    metadata: dict[str, object] = {
+        "id": entry_id,
+        "filename": filename,
+        "created_at": created_at or datetime.utcnow().isoformat() + "Z",
+        "variants": ordered_entries,
+        "primary_model": primary.get("model"),
+        "preview": _trim_preview(primary.get("preview", "")),
+        "preview_image": primary.get("preview_image"),
+        "models": [entry.get("model") for entry in ordered_entries if entry.get("model")],
+        "text_plain": primary.get("text_plain", ""),
+        "text_markdown": primary.get("text_markdown", ""),
+        "bounding_image": primary.get("bounding_image"),
+        "crops": primary.get("crops", []),
+    }
+
+    if warnings:
+        warning_set = {warning for warning in warnings if warning}
+        if warning_set:
+            metadata["warnings"] = list(warning_set)
+
+    return metadata
+
+
+def _ensure_input_snapshot(
+    entry_dir: Path,
+    original_filename: str,
+    original_bytes: bytes,
+    source_path: Path,
+) -> None:
+    input_target_dir = entry_dir / "input"
+    if input_target_dir.exists() and any(input_target_dir.iterdir()):
+        return
+
+    input_target_dir.mkdir(parents=True, exist_ok=True)
+    target_path = input_target_dir / original_filename
+    if source_path.exists():
+        shutil.copy(source_path, target_path)
+    else:
+        target_path.write_bytes(original_bytes)
+
+
+def _append_history_entry(
+    entry_id: str,
+    variants: Sequence[OCRVariantArtifacts],
+    original_filename: str,
+    original_bytes: bytes,
+    source_path: Path,
+    *,
+    warnings: Optional[Sequence[str]] = None,
+) -> dict[str, object]:
+    metadata, entry_dir = _load_entry_metadata(entry_id)
+
+    existing_entries: List[dict[str, object]] = []
+    if isinstance(metadata.get("variants"), list):
+        existing_entries = [entry for entry in metadata["variants"] if isinstance(entry, dict)]
+
+    replacement_keys = {variant.key for variant in variants}
+    filtered_entries = [entry for entry in existing_entries if entry.get("model") not in replacement_keys]
+    new_entries = [_store_variant_entry(entry_dir, variant) for variant in variants]
+    combined_entries = filtered_entries + new_entries
+
+    combined_warnings: List[str] = []
+    if isinstance(metadata.get("warnings"), list):
+        combined_warnings.extend(str(item) for item in metadata["warnings"] if item)
+    if warnings:
+        combined_warnings.extend(str(item) for item in warnings if item)
+
+    _ensure_input_snapshot(entry_dir, original_filename, original_bytes, source_path)
+
+    updated_metadata = _compose_history_metadata(
+        entry_id,
+        metadata.get("filename", original_filename),
+        combined_entries,
+        created_at=metadata.get("created_at"),
+        warnings=combined_warnings,
+    )
+
+    (entry_dir / "metadata.json").write_text(
+        json.dumps(updated_metadata, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    return updated_metadata
 
 
 def _load_entry_metadata(entry_id: str) -> tuple[dict[str, object], Path]:

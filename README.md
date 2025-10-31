@@ -39,7 +39,7 @@ Web UI と同じ FastAPI アプリケーションが JSON ベースの API を�
 | --- | --- | --- |
 | `GET` | `/api/ping` | サーバーの疎通確認。 `{ "status": "ok" }` を返します。 |
 | `GET` | `/api/models` | 利用可能な OCR モデルの一覧。`key` と `label` を返します。 |
-| `POST` | `/api/ocr` | ファイルをアップロードして OCR を実行。フォームデータで `file`（必須）、`prompt`（任意）、`models`（カンマ区切り／任意）を渡します。複数モデルを指定すると `variants` 配列で集約結果が返ります。 |
+| `POST` | `/api/ocr` | ファイルをアップロードして OCR を実行。フォームデータで `file`（必須）、`prompt`（任意）、`models`（カンマ区切り／任意）、`history_id`（任意・既存履歴へ追記）を渡します。複数モデルを指定すると `variants` 配列で集約結果が返ります。 |
 | `GET` | `/api/history` | 保存済み履歴の一覧。直近のエントリが降順で返り、プレビュー用のテキスト／画像 URL が含まれます。 |
 | `GET` | `/api/history/{entry_id}` | 特定履歴の詳細。`variants` にモデルごとの出力、`input_images` に元入力のダウンロード URL が含まれます。 |
 | `DELETE` | `/api/history/{entry_id}` | 指定された履歴を削除します。関連ファイルは `web_history/{entry_id}` から削除されます。 |
@@ -66,6 +66,8 @@ curl -X POST \
 ```
 
 レスポンスでは `history_id` に保存済みエントリの ID、`variants` にモデルごとの結果、`input_images` に元ファイルのアクセス URL が含まれます。複数モデルを指定した場合は `variants` に各モデルの枠が順番に入ります。
+
+既存の履歴に追記したい場合は、2 回目以降のリクエストで `-F "history_id=<前回のID>"` を追加します。これにより同じ履歴 ID に各モデルの結果がまとまり、履歴復元時にも全モデル分が表示されます。
 
 #### `/api/history` と `/api/history/{id}`
 

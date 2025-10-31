@@ -1729,7 +1729,9 @@ function mergeAggregateResponse(data, modelKey = null) {
   });
 
   if (data.history_id) {
-    activeAggregate.historyIds.push(data.history_id);
+    if (!activeAggregate.historyIds.includes(data.history_id)) {
+      activeAggregate.historyIds.push(data.history_id);
+    }
   }
 }
 
@@ -1833,6 +1835,7 @@ function handleFiles(files) {
       file,
       name,
       previewUrl,
+      historyId: null,
     });
     addInputPreview({ id, name, url: previewUrl, status: '待機中' });
   });
@@ -2060,6 +2063,9 @@ async function uploadModelVariant(item, modelKey, promptValue) {
     formData.append('prompt', promptValue);
   }
   formData.append('models', modelKey);
+  if (item.historyId) {
+    formData.append('history_id', item.historyId);
+  }
 
   setModelStatus(modelKey, 'running');
   setStatus(`${label} を解析中…`);
@@ -2076,6 +2082,11 @@ async function uploadModelVariant(item, modelKey, promptValue) {
     }
 
     const data = await response.json();
+    if (!item.historyId && data.history_id) {
+      item.historyId = data.history_id;
+    } else if (data.history_id) {
+      item.historyId = data.history_id;
+    }
     mergeAggregateResponse(data, modelKey);
     renderAggregateResult(item.name);
     if (data.history_id) {

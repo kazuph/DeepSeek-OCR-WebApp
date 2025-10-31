@@ -88,6 +88,7 @@ async def ocr_endpoint(
     file: UploadFile = File(...),
     prompt: str | None = Form(default=None),
     models: str | None = Form(default=None),
+    history_id: str | None = Form(default=None),
 ) -> dict[str, object]:
     content = await file.read()
     if not content:
@@ -101,6 +102,8 @@ async def ocr_endpoint(
             kwargs["prompt"] = prompt_value
         if models_value:
             kwargs["models"] = models_value
+        if history_id:
+            kwargs["history_id"] = history_id
         result = run_ocr_bytes(content, file.filename or "upload.png", **kwargs)
     except Exception as exc:  # noqa: BLE001 - surface to client
         raise HTTPException(status_code=500, detail=f"OCR failed: {exc}") from exc
