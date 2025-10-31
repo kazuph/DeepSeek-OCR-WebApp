@@ -31,6 +31,72 @@
 - 解析結果や履歴はモデル別に保存されるため、履歴からは各モデルを個別に再確認できます。
 - 手動の確認手順は [docs/manual_test_plan.md](docs/manual_test_plan.md) にまとめています。
 
+## REST API
+
+Web UI と同じ FastAPI アプリケーションが JSON ベースの API を公開しています。Docker 版では `uvicorn` が `0.0.0.0:8080` で待機し、CORS は `Allow-Origin: *` に設定済みなので外部ホストから直接アクセスできます。認証は現時点でありませんので、外部公開時はリバースプロキシなどで保護してください。
+
+| メソッド | パス | 説明 |
+| --- | --- | --- |
+| `GET` | `/api/ping` | サーバーの疎通確認。 `{ "status": "ok" }` を返します。 |
+| `GET` | `/api/models` | 利用可能な OCR モデルの一覧。`key` と `label` を返します。 |
+| `POST` | `/api/ocr` | ファイルをアップロードして OCR を実行。フォームデータで `file`（必須）、`prompt`（任意）、`models`（カンマ区切り／任意）を渡します。複数モデルを指定すると `variants` 配列で集約結果が返ります。 |
+| `GET` | `/api/history` | 保存済み履歴の一覧。直近のエントリが降順で返り、プレビュー用のテキスト／画像 URL が含まれます。 |
+| `GET` | `/api/history/{entry_id}` | 特定履歴の詳細。`variants` にモデルごとの出力、`input_images` に元入力のダウンロード URL が含まれます。 |
+| `DELETE` | `/api/history/{entry_id}` | 指定された履歴を削除します。関連ファイルは `web_history/{entry_id}` から削除されます。 |
+| `GET` | `/api/history/{entry_id}/image/bounding` | 保存済みバウンディング画像を取得。`model` クエリでバリアントを指定できます。 |
+| `GET` | `/api/history/{entry_id}/image/crop/{path}` | 履歴から個別クロップを取得。`{path}` は `variants[*].crops[].path` と一致させます。 |
+| `GET` | `/api/history/{entry_id}/image/input/{path}` | OCR 実行時にアップロードされた元ファイルを取得します。`{path}` は `input_images[].path` に対応します。 |
+
+### cURL での利用例
+
+#### `/api/models`
+
+```bash
+curl http://<host>:8080/api/models | jq
+```
+
+#### `/api/ocr`
+
+```bash
+curl -X POST \
+  -F "file=@tests/fixtures/doc.png" \
+  -F "prompt=<image>\n<|grounding|>Convert the document to markdown." \
+  -F "models=deepseek,yomitoku" \
+  http://<host>:8080/api/ocr | jq
+```
+
+レスポンスでは `history_id` に保存済みエントリの ID、`variants` にモデルごとの結果、`input_images` に元ファイルのアクセス URL が含まれます。複数モデルを指定した場合は `variants` に各モデルの枠が順番に入ります。
+
+#### `/api/history` と `/api/history/{id}`
+
+```bash
+# 一覧を取得
+curl http://<host>:8080/api/history | jq
+
+# ID を指定して詳細を取得
+curl http://<host>:8080/api/history/20251029021741-1fb89c21 | jq
+```
+
+詳細レスポンスでは `variants[*].text_markdown` や `variants[*].crops[*].url` を使ってモデル別の成果物へアクセスできます。`input_images[*].url` はアップロード時の元ファイルをそのまま返すダウンロード URL です。
+
+#### 画像／入力のダウンロード
+
+```bash
+# 特定のクロップ画像を取得
+curl -o crop.png \
+  "http://<host>:8080/api/history/20251029021741-1fb89c21/image/crop/artifacts/images/0.jpg?model=deepseek"
+
+# 元の入力画像を取得
+curl -o original.png \
+  http://<host>:8080/api/history/20251029021741-1fb89c21/image/input/image.png
+```
+
+### 外部公開時の注意
+
+- コンテナは既定で `0.0.0.0` にバインドし、CORS も許可済みです。社外公開する場合は HTTPS 化や Basic 認証などの追加保護を検討してください。
+- `web_history/` ディレクトリに入力画像・出力テキストが平文で保存されます。定期的なクリーンアップや暗号化ストレージの活用を推奨します。
+- 大きなファイルを扱う場合、`nginx` や `traefik` などのリバースプロキシでタイムアウトや帯域を調整すると安定します。
+
 
 
 

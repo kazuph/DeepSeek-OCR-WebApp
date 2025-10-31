@@ -44,6 +44,102 @@ const MODEL_STATUS_CLASSES = {
   error: 'error',
 };
 
+const modelTimerHandles = new Map();
+
+function escapeCssIdentifier(value) {
+  if (window.CSS && typeof window.CSS.escape === 'function') {
+    return window.CSS.escape(value);
+  }
+  return String(value).replace(/[^a-zA-Z0-9_-]/g, (char) => `\\${char}`);
+}
+
+function createStatusInfo(status = 'pending') {
+  return {
+    status,
+    startedAt: null,
+    finishedAt: null,
+    elapsedSeconds: null,
+  };
+}
+
+function getNow() {
+  if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
+    return performance.now();
+  }
+  return Date.now();
+}
+
+function computeElapsedSeconds(info) {
+  if (!info) return null;
+  if (info.status === 'running' && typeof info.startedAt === 'number') {
+    const seconds = Math.max(0, (getNow() - info.startedAt) / 1000);
+    info.elapsedSeconds = seconds;
+    return seconds;
+  }
+  if (typeof info.elapsedSeconds === 'number') {
+    return info.elapsedSeconds;
+  }
+  return null;
+}
+
+function formatStatusLabel(info) {
+  if (!info) return '';
+  const statusKey = info.status;
+  const statusLabel = MODEL_STATUS_LABELS[statusKey] || statusKey || '';
+  const elapsed = computeElapsedSeconds(info);
+  if (elapsed == null) {
+    return statusLabel;
+  }
+  if (statusKey === 'running') {
+    return `${statusLabel} (${elapsed.toFixed(1)}秒経過)`;
+  }
+  return `${statusLabel} (${elapsed.toFixed(1)}秒)`;
+}
+
+function updateModelTimerDisplay(key) {
+  const info = modelStatusMap.get(key);
+  if (!info) {
+    stopModelTimer(key);
+    return;
+  }
+  const selector = `.model-option-status[data-model-key="${escapeCssIdentifier(key)}"]`;
+  const badge = document.querySelector(selector);
+  if (badge) {
+    badge.textContent = formatStatusLabel(info);
+  }
+  updateModelInfo();
+}
+
+function startModelTimer(key) {
+  stopModelTimer(key);
+  updateModelTimerDisplay(key);
+  const handle = setInterval(() => {
+    const info = modelStatusMap.get(key);
+    if (!info || info.status !== 'running' || typeof info.startedAt !== 'number') {
+      stopModelTimer(key);
+      updateModelTimerDisplay(key);
+      return;
+    }
+    updateModelTimerDisplay(key);
+  }, 200);
+  modelTimerHandles.set(key, handle);
+}
+
+function stopModelTimer(key) {
+  const handle = modelTimerHandles.get(key);
+  if (handle) {
+    clearInterval(handle);
+    modelTimerHandles.delete(key);
+  }
+}
+
+function stopAllModelTimers() {
+  modelTimerHandles.forEach((handle) => {
+    clearInterval(handle);
+  });
+  modelTimerHandles.clear();
+}
+
 let currentTextMode = 'markdown';
 let processing = false;
 const queue = [];
@@ -54,6 +150,7 @@ let historyEntries = [];
 let activeHistoryId = null;
 const inputPreviews = [];
 const textCardRegistry = [];
+let historyInputImages = [];
 let progressTimer = null;
 let progressValue = 0;
 let progressSession = 0;
@@ -108,8 +205,8 @@ function formatModelStatusText() {
     return null;
   }
   const parts = sortModelKeys(modelStatusMap.keys()).map((key) => {
-    const status = modelStatusMap.get(key);
-    const label = MODEL_STATUS_LABELS[status] || status || '';
+    const info = modelStatusMap.get(key) || createStatusInfo('pending');
+    const label = formatStatusLabel(info) || info.status || '';
     return `${labelForModel(key)}:${label}`;
   });
   return parts.join(' / ');
@@ -194,12 +291,16 @@ function renderModelOptions() {
       option.appendChild(description);
     }
 
-    const statusKey = modelStatusMap.get(model.key);
+    const info = modelStatusMap.get(model.key);
+    const statusKey = info?.status;
     if (statusKey) {
       const statusBadge = document.createElement('span');
       const className = MODEL_STATUS_CLASSES[statusKey] || 'pending';
       statusBadge.className = `model-option-status model-status-${className}`;
-      statusBadge.textContent = MODEL_STATUS_LABELS[statusKey] || statusKey;
+      statusBadge.dataset.modelKey = model.key;
+      statusBadge.dataset.status = statusKey;
+      const labelText = formatStatusLabel(info) || MODEL_STATUS_LABELS[statusKey] || statusKey;
+      statusBadge.textContent = labelText;
       option.appendChild(statusBadge);
     }
 
@@ -211,9 +312,10 @@ function renderModelOptions() {
 }
 
 function resetModelStatuses(models) {
+  stopAllModelTimers();
   modelStatusMap = new Map();
   sortModelKeys(models).forEach((key) => {
-    modelStatusMap.set(key, 'pending');
+    modelStatusMap.set(key, createStatusInfo('pending'));
   });
   updateModelInfo();
   renderModelOptions();
@@ -223,12 +325,44 @@ function setModelStatus(key, status) {
   if (!key) {
     return;
   }
-  modelStatusMap.set(key, status);
+
+  const now = getNow();
+  const existing = modelStatusMap.get(key);
+  const info = existing ? { ...existing } : createStatusInfo();
+  info.status = status;
+
+  if (status === 'running') {
+    if (typeof info.startedAt !== 'number') {
+      info.startedAt = now;
+    }
+    info.finishedAt = null;
+    modelStatusMap.set(key, info);
+    updateModelInfo();
+    renderModelOptions();
+    startModelTimer(key);
+    return;
+  }
+
+  if (typeof info.startedAt === 'number' && info.startedAt !== null) {
+    info.elapsedSeconds = Math.max(0, (now - info.startedAt) / 1000);
+  }
+  if (status === 'pending') {
+    info.startedAt = null;
+    info.finishedAt = null;
+    info.elapsedSeconds = null;
+  } else {
+    info.finishedAt = now;
+  }
+
+  modelStatusMap.set(key, info);
+  stopModelTimer(key);
   updateModelInfo();
   renderModelOptions();
+  updateModelTimerDisplay(key);
 }
 
 function clearModelStatuses() {
+  stopAllModelTimers();
   modelStatusMap.clear();
   updateModelInfo();
   renderModelOptions();
@@ -526,6 +660,88 @@ function findPreview(id) {
   return inputPreviews.find((entry) => entry.id === id);
 }
 
+function setHistoryInputImages(images, fallbackName = 'ocr', historyId = 'history') {
+  historyInputImages = [];
+  if (Array.isArray(images)) {
+    images.forEach((image, index) => {
+      if (!image || !image.url) {
+        return;
+      }
+      const baseName = image.name || fallbackName || `input-${index + 1}`;
+      const identifier = image.path || image.url || `${index}`;
+      historyInputImages.push({
+        id: `history-${historyId}-${identifier}`,
+        name: baseName,
+        url: image.url,
+        status: '履歴',
+        order: index,
+      });
+    });
+  }
+  renderPreviews();
+}
+
+function clearHistoryInputImages() {
+  if (!historyInputImages.length) {
+    return;
+  }
+  historyInputImages = [];
+  renderPreviews();
+}
+
+function extractElapsedSeconds(variant) {
+  if (!variant) {
+    return null;
+  }
+  if (typeof variant.elapsedSeconds === 'number') {
+    return variant.elapsedSeconds;
+  }
+  if (variant.metadata && typeof variant.metadata.elapsed_seconds === 'number') {
+    return variant.metadata.elapsed_seconds;
+  }
+  return null;
+}
+
+function applyHistoryModelStatuses(variants) {
+  if (processing || queue.length) {
+    return;
+  }
+  if (!Array.isArray(variants) || !variants.length) {
+    clearModelStatuses();
+    return;
+  }
+
+  const updated = new Map();
+  variants.forEach((variant) => {
+    const key = variant?.key || variant?.model;
+    if (!key) {
+      return;
+    }
+    const info = createStatusInfo('success');
+    const elapsed = extractElapsedSeconds(variant);
+    if (typeof elapsed === 'number') {
+      info.elapsedSeconds = elapsed;
+    }
+    updated.set(key, info);
+  });
+
+  const coverageSource = modelStatusMap.size
+    ? [...modelStatusMap.keys()]
+    : availableModels.map((model) => model.key);
+  const coverageKeys = sortModelKeys([...new Set(coverageSource.filter(Boolean))]);
+
+  coverageKeys.forEach((key) => {
+    if (!updated.has(key)) {
+      updated.set(key, createStatusInfo('pending'));
+    }
+  });
+
+  stopAllModelTimers();
+  modelStatusMap = updated;
+  updateModelInfo();
+  renderModelOptions();
+}
+
 function pruneInputPreviews() {
   const activeIds = new Set();
   if (currentItem) {
@@ -549,8 +765,17 @@ function renderPreviews() {
   if (!inputPreviewSection || !inputPreviewGrid) return;
   pruneInputPreviews();
 
-  const items = [...inputPreviews].sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0));
-  const visibleItems = items.slice(0, MAX_PREVIEW_COLUMNS * MAX_PREVIEW_ROWS);
+  const historyItems = historyInputImages
+    .slice()
+    .sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
+    .map((entry, index) => ({ ...entry, renderOrder: index }));
+
+  const currentItems = [...inputPreviews]
+    .sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0))
+    .map((entry, index) => ({ ...entry, renderOrder: historyItems.length + index }));
+
+  const combined = [...historyItems, ...currentItems];
+  const visibleItems = combined.slice(0, MAX_PREVIEW_COLUMNS * MAX_PREVIEW_ROWS);
   const hasItems = visibleItems.length > 0;
   inputPreviewSection.classList.toggle('hidden', !hasItems);
 
@@ -564,7 +789,11 @@ function renderPreviews() {
   visibleItems.forEach((entry, index) => {
     const item = document.createElement('div');
     item.className = 'preview-item';
-    item.dataset.status = entry.status;
+    if (entry.status) {
+      item.dataset.status = entry.status;
+    } else if (item.dataset.status) {
+      delete item.dataset.status;
+    }
 
     const columnIndex = (index % MAX_PREVIEW_COLUMNS) + 1;
     const rowIndex = Math.floor(index / MAX_PREVIEW_COLUMNS) + 1;
@@ -668,20 +897,43 @@ function normalizeMathBlocks(markdown) {
     return markdown;
   }
 
-  const pattern = /(^|\r?\n)([ \t]*)\[\s*([\s\S]*?)\s*\](?=\r?\n|$)/g;
-  return markdown.replace(pattern, (match, prefix, indent, content) => {
-    const trimmed = (content ?? '').trim();
-    if (!trimmed || !isLikelyMathContent(trimmed)) {
-      return match;
+  const wrapDisplayMatch = (prefix, indent, body, fallback) => {
+    const trimmed = (body ?? '').trim();
+    if (!trimmed || /^\\\[|^\$\$/.test(trimmed)) {
+      return fallback;
+    }
+    if (!isLikelyMathContent(trimmed)) {
+      return fallback;
     }
 
     const cleaned = sanitizeMathContent(trimmed);
     if (!cleaned) {
-      return match;
+      return fallback;
     }
 
-    return `${prefix}${indent}\\[\n${cleaned}\n${indent}\\]`;
-  });
+    const safePrefix = prefix || '';
+    const safeIndent = indent || '';
+    return `${safePrefix}${safeIndent}\\[\n${cleaned}\n${safeIndent}\\]`;
+  };
+
+  let processed = markdown;
+
+  const bracketPattern = /(^|\r?\n)([ \t]*)\[\s*([\s\S]*?)\s*\](?=\r?\n|$)/g;
+  processed = processed.replace(bracketPattern, (match, prefix, indent, content) =>
+    wrapDisplayMatch(prefix, indent, content, match)
+  );
+
+  const leftRightPattern = /(^|\r?\n)([ \t]*)(\\left[\s\S]*?\\right[\.\}\)\]]?)(?=\r?\n|$)/g;
+  processed = processed.replace(leftRightPattern, (match, prefix, indent, content) =>
+    wrapDisplayMatch(prefix, indent, content, match)
+  );
+
+  const environmentPattern = /(^|\r?\n)([ \t]*)(\\begin\{[^}]+\}[\s\S]*?\\end\{[^}]+\})(?=\r?\n|$)/g;
+  processed = processed.replace(environmentPattern, (match, prefix, indent, content) =>
+    wrapDisplayMatch(prefix, indent, content, match)
+  );
+
+  return processed;
 }
 
 function normalizeMathNodes(container) {
@@ -1051,6 +1303,7 @@ function clearResults() {
   }
   textCardRegistry.length = 0;
   lastResult = null;
+  clearHistoryInputImages();
 }
 
 function updateQueueStatus() {
@@ -1383,6 +1636,13 @@ function displayResult(data, filename, historyId = null, createdAt = null) {
     historyId,
     createdAt: createdTimestamp,
   };
+
+  if (Object.prototype.hasOwnProperty.call(data || {}, 'input_images')) {
+    const inputImages = Array.isArray(data.input_images) ? data.input_images : [];
+    setHistoryInputImages(inputImages, effectiveFilename, historyId || data?.history_id || 'history');
+  }
+
+  applyHistoryModelStatuses(variants);
 
   renderTextVariants(variants, context);
   renderCropVariants(variants, context);

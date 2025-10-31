@@ -169,3 +169,18 @@ async def history_crop_image(entry_id: str, file_path: str, model: str | None = 
 
     path = _resolve_history_file(entry_dir, candidate, variant_key)
     return FileResponse(path)
+
+
+@app.get("/api/history/{entry_id}/image/input/{file_path:path}")
+async def history_input_image(entry_id: str, file_path: str) -> FileResponse:
+    try:
+        _, entry_dir = _load_entry_metadata(entry_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="History entry not found") from exc
+
+    if not (entry_dir / "input").exists():
+        raise HTTPException(status_code=404, detail="Input image not found")
+
+    relative = Path("input") / file_path
+    path = _resolve_history_file(entry_dir, relative.as_posix())
+    return FileResponse(path)

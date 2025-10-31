@@ -784,6 +784,31 @@ def _run_yomitoku_variant(input_path: Path, work_dir: Path) -> OCRVariantArtifac
     )
 
 
+def _build_input_images(entry_id: str, entry_dir: Path) -> List[dict[str, str]]:
+    images: List[dict[str, str]] = []
+    input_dir = entry_dir / "input"
+    if not input_dir.exists():
+        return images
+
+    for path in sorted(input_dir.rglob("*")):
+        if not path.is_file():
+            continue
+        try:
+            relative = path.relative_to(input_dir).as_posix()
+        except ValueError:
+            relative = path.name
+        url_path = quote(relative, safe="/")
+        images.append(
+            {
+                "name": path.name,
+                "path": relative,
+                "url": f"/api/history/{entry_id}/image/input/{url_path}",
+            }
+        )
+
+    return images
+
+
 def run_ocr_bytes(
     image_bytes: bytes,
     filename: str,
@@ -857,6 +882,8 @@ def run_ocr_bytes(
 
         metadata = _persist_history_entry(variant_results, safe_name, image_bytes, input_path, warnings=variant_errors)
         entry_id = metadata["id"]
+        entry_dir = WEB_HISTORY_DIR / entry_id
+        input_images = _build_input_images(entry_id, entry_dir)
 
         variant_payloads: List[dict[str, object]] = []
         variants_meta = metadata.get("variants")
@@ -893,6 +920,7 @@ def run_ocr_bytes(
             "preview_image_url": primary_variant.get("preview_image_url"),
             "preview": primary_variant.get("preview", metadata.get("preview", "")),
             "variants": variant_payloads,
+            "input_images": input_images,
             "metadata": {
                 "input": safe_name,
                 "models": [variant.get("model") for variant in variant_payloads],
@@ -1151,7 +1179,8 @@ def list_history_entries(limit: int | None = None) -> List[dict[str, object]]:
 
 
 def load_history_entry(entry_id: str) -> dict[str, object]:
-    metadata, _ = _load_entry_metadata(entry_id)
+    metadata, entry_dir = _load_entry_metadata(entry_id)
+    input_images = _build_input_images(entry_id, entry_dir)
 
     variants_payload: List[dict[str, object]] = []
     variants_meta = metadata.get("variants")
@@ -1188,6 +1217,7 @@ def load_history_entry(entry_id: str) -> dict[str, object]:
         "preview_image_url": primary_variant.get("preview_image_url"),
         "preview": primary_variant.get("preview", metadata.get("preview", "")),
         "variants": variants_payload,
+        "input_images": input_images,
         "metadata": {
             "input": metadata.get("filename", entry_id),
             "models": [variant.get("model") for variant in variants_payload],
