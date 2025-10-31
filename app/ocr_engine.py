@@ -10,7 +10,9 @@ import os
 import re
 import shutil
 import tempfile
+import time
 import uuid
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -23,7 +25,7 @@ import numpy as np
 
 import fitz  # type: ignore
 import torch
-from transformers import AutoModel, AutoTokenizer
+from transformers import AutoModel, AutoTokenizer, BitsAndBytesConfig
 from transformers.cache_utils import DynamicCache
 from transformers.models.llama import modeling_llama
 
@@ -116,12 +118,28 @@ WEB_HISTORY_DIR.mkdir(parents=True, exist_ok=True)
 
 
 MODEL_DESCRIPTORS: List[ModelDescriptor] = [
-    ModelDescriptor(key="deepseek", label="DeepSeek OCR"),
     ModelDescriptor(key="yomitoku", label="YomiToku Document Analyzer"),
+    ModelDescriptor(key="deepseek", label="DeepSeek OCR"),
+#    ModelDescriptor(
+#        key="deepseek-8bit",
+#        label="DeepSeek OCR (8-bit Quantized)",
+#        description="BitsAndBytes 8-bit quantization for mid-range GPUs.",
+#    ),
+    ModelDescriptor(
+        key="deepseek-4bit",
+        label="DeepSeek OCR (4-bit Quantized)",
+        description="BitsAndBytes 4-bit build for lower VRAM CUDA GPUs.",
+    ),
 ]
 
 MODEL_DESCRIPTOR_MAP: Dict[str, ModelDescriptor] = {item.key: item for item in MODEL_DESCRIPTORS}
-DEFAULT_MODEL_KEY = MODEL_DESCRIPTORS[0].key
+DEFAULT_MODEL_KEY = "deepseek"
+MODEL_EXECUTION_PRIORITY = {
+    "yomitoku": 0,
+    "deepseek": 1,
+    # "deepseek-8bit": 2,
+    "deepseek-4bit": 2,
+}
 
 _CV2_MODULE = None
 _YOMITOKU_EXECUTOR: Optional[ThreadPoolExecutor] = None
@@ -201,8 +219,12 @@ def encode_file_to_data_url(path: Path) -> str:
 
 
 _MODEL_CACHE: dict[tuple[str, str, str], tuple[AutoTokenizer, AutoModel]] = {}
+_QUANT_MODEL_CACHE: dict[tuple[str, str, str], tuple[AutoTokenizer, AutoModel]] = {}
+# _EIGHTBIT_MODEL_CACHE: dict[tuple[str, str, str], tuple[AutoTokenizer, AutoModel]] = {}
 _YOMITOKU_ANALYZERS: Dict[tuple[str, bool], object] = {}
 DEFAULT_MODEL_NAME = "deepseek-ai/DeepSeek-OCR"
+QUANTIZED_MODEL_NAME = "Jalea96/DeepSeek-OCR-bnb-4bit-NF4"
+# EIGHTBIT_MODEL_ALIAS = "deepseek-ai/DeepSeek-OCR#8bit"
 
 
 def _get_device() -> str:
@@ -210,13 +232,21 @@ def _get_device() -> str:
 
 
 def get_model(model_name: str, attn_impl: str) -> tuple[AutoTokenizer, AutoModel]:
+    if model_name == QUANTIZED_MODEL_NAME:
+        return _get_quantized_model(model_name, attn_impl)
+    # if model_name == EIGHTBIT_MODEL_ALIAS:
+    #     return _get_8bit_model(DEFAULT_MODEL_NAME, attn_impl)
     device = _get_device()
     key = (model_name, attn_impl, device)
     if key in _MODEL_CACHE:
         return _MODEL_CACHE[key]
 
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-    load_dtype = torch.bfloat16 if device == "cuda" else torch.float32
+    if device == "cuda":
+        supports_bf16 = getattr(torch.cuda, "is_bf16_supported", lambda: False)()
+        load_dtype = torch.bfloat16 if supports_bf16 else torch.float16
+    else:
+        load_dtype = torch.float32
     model = AutoModel.from_pretrained(
         model_name,
         _attn_implementation=attn_impl,
@@ -226,12 +256,96 @@ def get_model(model_name: str, attn_impl: str) -> tuple[AutoTokenizer, AutoModel
     )
 
     if device == "cuda":
-        model = model.eval().to(device="cuda", dtype=torch.bfloat16)
+        model = model.eval().to(device="cuda", dtype=load_dtype)
     else:
         model = model.eval().to(torch.float32)
 
     _MODEL_CACHE[key] = (tokenizer, model)
     return tokenizer, model
+
+
+def _get_quantized_model(model_repo: str, attn_impl: str) -> tuple[AutoTokenizer, AutoModel]:
+    device = _get_device()
+    cache_key = (model_repo, attn_impl, device)
+    cached = _QUANT_MODEL_CACHE.get(cache_key)
+    if cached:
+        return cached
+
+    if device != "cuda":
+        raise RuntimeError(
+            "DeepSeek OCR (4-bit Quantized) requires a CUDA-enabled GPU. "
+            "Run with the full precision model when GPU is unavailable."
+        )
+
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(model_repo, trust_remote_code=True)
+
+        bf16_supported = getattr(torch.cuda, "is_bf16_supported", lambda: False)()
+        compute_dtype = torch.bfloat16 if bf16_supported else torch.float16
+
+        quant_kwargs: dict[str, object] = {
+            "load_in_4bit": True,
+            "bnb_4bit_use_double_quant": False,
+            "bnb_4bit_quant_type": "nf4",
+            "bnb_4bit_compute_dtype": compute_dtype,
+        }
+
+        def _build_quant_config(kwargs: dict[str, object]) -> BitsAndBytesConfig:
+            try:
+                return BitsAndBytesConfig(**kwargs)
+            except TypeError:
+                fallback = dict(kwargs)
+                fallback.pop("bnb_4bit_use_double_quant", None)
+                return BitsAndBytesConfig(**fallback)
+
+        device_index = torch.cuda.current_device()
+
+        def _load_model(current_kwargs: dict[str, object]):
+            return AutoModel.from_pretrained(
+                model_repo,
+                _attn_implementation=attn_impl,
+                trust_remote_code=True,
+                use_safetensors=True,
+                torch_dtype=compute_dtype,
+                quantization_config=_build_quant_config(current_kwargs),
+                device_map={"": device_index},
+                low_cpu_mem_usage=True,
+            )
+
+        try:
+            model = _load_model(quant_kwargs)
+        except RuntimeError as exc:
+            if "out of memory" in str(exc).lower():
+                quant_kwargs["bnb_4bit_use_double_quant"] = True
+                model = _load_model(quant_kwargs)
+            else:
+                raise
+    except Exception as exc:  # noqa: BLE001 - surface dependency issues
+        raise RuntimeError(
+            "Failed to load the 4-bit quantized model. Ensure `bitsandbytes`, `accelerate`, "
+            "and compatible CUDA drivers are installed."
+        ) from exc
+
+    model = model.eval()
+    if hasattr(model, "config") and getattr(model.config, "use_cache", True) is False:
+        try:
+            model.config.use_cache = True  # type: ignore[attr-defined]
+        except Exception:  # pragma: no cover - best-effort safeguard
+            pass
+    _QUANT_MODEL_CACHE[cache_key] = (tokenizer, model)
+    return tokenizer, model
+
+
+def _release_cached_model(model_name: str, attn_impl: str) -> None:
+    device = _get_device()
+    cache_key = (model_name, attn_impl, device)
+    if model_name == QUANTIZED_MODEL_NAME:
+        _QUANT_MODEL_CACHE.pop(cache_key, None)
+    if cache_key in _MODEL_CACHE:
+        _MODEL_CACHE.pop(cache_key, None)
+
+# def _get_8bit_model(model_repo: str, attn_impl: str) -> tuple[AutoTokenizer, AutoModel]:
+#     ...
 
 
 def run_ocr_documents(
@@ -260,58 +374,73 @@ def run_ocr_documents(
             raise FileNotFoundError(f"Input path not found: {path}")
 
     tokenizer, model = get_model(model_name, attn_impl)
+    device = _get_device()
+    autocast_dtype = None
+    if device == "cuda":
+        supports_bf16 = getattr(torch.cuda, "is_bf16_supported", lambda: False)()
+        autocast_dtype = torch.bfloat16 if supports_bf16 else torch.float16
     image_paths = collect_image_paths(resolved_inputs, output_dir)
 
     results: List[OCRDocumentResult] = []
-    for image_path in image_paths:
-        image_output_dir = artifact_dir / image_path.stem
-        image_output_dir.mkdir(parents=True, exist_ok=True)
-        inference_output = model.infer(
-            tokenizer,
-            prompt=prompt,
-            image_file=str(image_path),
-            output_path=str(image_output_dir),
-            base_size=base_size,
-            image_size=image_size,
-            crop_mode=crop_mode,
-            save_results=True,
-            test_compress=True,
-        )
-
-        plain_text = as_text(inference_output).strip()
-        text_candidates = [plain_text]
-        result_mmd = image_output_dir / "result.mmd"
-        if result_mmd.exists():
-            text_candidates.append(result_mmd.read_text(encoding="utf-8"))
-        result_md = image_output_dir / "result.md"
-        if result_md.exists():
-            text_candidates.append(result_md.read_text(encoding="utf-8"))
-
-        markdown_text = next(
-            (c.strip() for c in text_candidates if c and c.strip() and c.strip().lower() != "none"),
-            "",
-        )
-        if not plain_text or plain_text.lower() == "none":
-            plain_text = markdown_text
-
-        text_path = text_dir / f"{image_path.stem}.md"
-        text_path.write_text(markdown_text, encoding="utf-8")
-
-        if save_json:
-            payload = {"raw": inference_output}
-            json_path = text_dir / f"{image_path.stem}.json"
-            json_path.write_text(json.dumps(payload, default=str, ensure_ascii=False, indent=2), encoding="utf-8")
-
-        results.append(
-            OCRDocumentResult(
-                input_path=image_path,
-                image_path=image_path,
-                artifact_dir=image_output_dir,
-                text_path=text_path,
-                text_plain=plain_text,
-                text_markdown=markdown_text,
+    try:
+        for image_path in image_paths:
+            image_output_dir = artifact_dir / image_path.stem
+            image_output_dir.mkdir(parents=True, exist_ok=True)
+            autocast_context = (
+                torch.cuda.amp.autocast(dtype=autocast_dtype) if autocast_dtype else nullcontext()
             )
-        )
+            with torch.inference_mode():
+                with autocast_context:
+                    inference_output = model.infer(
+                        tokenizer,
+                        prompt=prompt,
+                        image_file=str(image_path),
+                        output_path=str(image_output_dir),
+                        base_size=base_size,
+                        image_size=image_size,
+                        crop_mode=crop_mode,
+                        save_results=True,
+                        test_compress=True,
+                    )
+
+            plain_text = as_text(inference_output).strip()
+            text_candidates = [plain_text]
+            result_mmd = image_output_dir / "result.mmd"
+            if result_mmd.exists():
+                text_candidates.append(result_mmd.read_text(encoding="utf-8"))
+            result_md = image_output_dir / "result.md"
+            if result_md.exists():
+                text_candidates.append(result_md.read_text(encoding="utf-8"))
+
+            markdown_text = next(
+                (c.strip() for c in text_candidates if c and c.strip() and c.strip().lower() != "none"),
+                "",
+            )
+            if not plain_text or plain_text.lower() == "none":
+                plain_text = markdown_text
+
+            text_path = text_dir / f"{image_path.stem}.md"
+            text_path.write_text(markdown_text, encoding="utf-8")
+
+            if save_json:
+                payload = {"raw": inference_output}
+                json_path = text_dir / f"{image_path.stem}.json"
+                json_path.write_text(json.dumps(payload, default=str, ensure_ascii=False, indent=2), encoding="utf-8")
+
+            results.append(
+                OCRDocumentResult(
+                    input_path=image_path,
+                    image_path=image_path,
+                    artifact_dir=image_output_dir,
+                    text_path=text_path,
+                    text_plain=plain_text,
+                    text_markdown=markdown_text,
+                )
+            )
+    finally:
+        if device == "cuda" and model_name == QUANTIZED_MODEL_NAME:
+            _release_cached_model(model_name, attn_impl)
+            torch.cuda.empty_cache()
 
     return results
 
@@ -336,6 +465,7 @@ def _normalize_model_selection(models: Optional[Sequence[str] | str]) -> List[st
             normalized.append(key)
     if not normalized:
         normalized.append(DEFAULT_MODEL_KEY)
+    normalized.sort(key=lambda key: MODEL_EXECUTION_PRIORITY.get(key, len(MODEL_EXECUTION_PRIORITY)))
     return normalized
 
 
@@ -493,6 +623,66 @@ def _run_deepseek_variant(
         extras={"attn_impl": attn_impl},
     )
 
+# def _run_8bit_deepseek_variant(...):
+#     pass
+
+
+def _run_quantized_deepseek_variant(
+    input_path: Path,
+    work_dir: Path,
+    *,
+    prompt: str,
+    base_size: int,
+    image_size: int,
+    crop_mode: bool,
+    attn_impl: str,
+) -> OCRVariantArtifacts:
+    results = run_ocr_documents(
+        [input_path],
+        work_dir,
+        model_name=QUANTIZED_MODEL_NAME,
+        prompt=prompt,
+        base_size=base_size,
+        image_size=image_size,
+        crop_mode=crop_mode,
+        attn_impl=attn_impl,
+        save_json=False,
+    )
+    if not results:
+        raise RuntimeError("DeepSeek OCR (4-bit Quantized) produced no output")
+
+    doc = results[0]
+    descriptor = _descriptor_for("deepseek-4bit")
+
+    bounding_path: Optional[Path] = None
+    for candidate in ("result_with_boxes.jpg", "result_with_boxes.png"):
+        candidate_path = doc.artifact_dir / candidate
+        if candidate_path.exists():
+            bounding_path = candidate_path
+            break
+
+    crop_paths: List[Path] = []
+    images_dir = doc.artifact_dir / "images"
+    if images_dir.exists():
+        crop_paths = sorted([p for p in images_dir.iterdir() if p.is_file()])
+
+    preview_image = bounding_path or (crop_paths[0] if crop_paths else None)
+    preview_text = _trim_preview(doc.text_markdown, doc.text_plain)
+
+    return OCRVariantArtifacts(
+        key=descriptor.key,
+        label=descriptor.label,
+        text_plain=doc.text_plain,
+        text_markdown=doc.text_markdown,
+        artifact_dir=doc.artifact_dir,
+        text_path=doc.text_path,
+        bounding_image=bounding_path,
+        crop_images=crop_paths,
+        preview_text=preview_text,
+        preview_image=preview_image,
+        extras={"attn_impl": attn_impl, "quantized": True, "model_repo": QUANTIZED_MODEL_NAME},
+    )
+
 
 def _rewrite_yomitoku_markdown_links(markdown: str, figures_dir: Path) -> str:
     relative_prefix = Path("artifacts") / "figures" / figures_dir.name
@@ -625,6 +815,7 @@ def run_ocr_bytes(
             work_dir = tmp_path / f"{key}_work"
             descriptor = _descriptor_for(key)
             try:
+                start_time = time.perf_counter()
                 if key == "deepseek":
                     variant = _run_deepseek_variant(
                         input_path,
@@ -636,10 +827,24 @@ def run_ocr_bytes(
                         crop_mode=crop_mode,
                         attn_impl=attn_impl,
                     )
+                elif key == "deepseek-4bit":
+                    variant = _run_quantized_deepseek_variant(
+                        input_path,
+                        work_dir,
+                        prompt=prompt,
+                        base_size=base_size,
+                        image_size=image_size,
+                        crop_mode=crop_mode,
+                        attn_impl=attn_impl,
+                    )
                 elif key == "yomitoku":
                     variant = _run_yomitoku_variant(input_path, work_dir)
                 else:
                     raise ValueError(f"Unsupported OCR model '{key}'")
+                elapsed = time.perf_counter() - start_time
+                extras = variant.extras.copy() if variant.extras else {}
+                extras["elapsed_seconds"] = round(elapsed, 3)
+                variant.extras = extras
                 variant_results.append(variant)
             except Exception as exc:  # noqa: BLE001
                 LOGGER.exception("%s failed during OCR", descriptor.label)
@@ -889,6 +1094,7 @@ def _build_variant_response(entry_id: str, metadata: dict[str, object], variant_
         "preview_image_url": preview_url,
         "preview": variant_meta.get("preview", ""),
         "metadata": variant_metadata,
+        "elapsed_seconds": variant_metadata.get("elapsed_seconds") or extras.get("elapsed_seconds"),
     }
 
 
