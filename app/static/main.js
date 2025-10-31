@@ -26,6 +26,23 @@ const progressWrapper = document.getElementById('progress-wrapper');
 const progressBar = document.getElementById('progress-bar');
 const MAX_PREVIEW_COLUMNS = 5;
 const MAX_PREVIEW_ROWS = 2;
+const MODEL_PRIORITIES = {
+  yomitoku: 0,
+  deepseek: 1,
+  'deepseek-4bit': 2,
+};
+const MODEL_STATUS_LABELS = {
+  pending: '待機中',
+  running: '処理中',
+  success: '完了',
+  error: '失敗',
+};
+const MODEL_STATUS_CLASSES = {
+  pending: 'pending',
+  running: 'running',
+  success: 'success',
+  error: 'error',
+};
 
 let currentTextMode = 'markdown';
 let processing = false;
@@ -44,6 +61,8 @@ let activeProgressSession = 0;
 let availableModels = [];
 let selectedModels = new Set();
 let serverStatusText = 'モデル初期化待機中…';
+let modelStatusMap = new Map();
+let activeAggregate = null;
 const MATH_LINEBREAK_ENVS = new Set([
   'align',
   'align*',
@@ -73,14 +92,45 @@ function labelForModel(key) {
   return key;
 }
 
+function sortModelKeys(keys) {
+  return [...keys].sort((a, b) => {
+    const aPriority = MODEL_PRIORITIES[a] ?? 99;
+    const bPriority = MODEL_PRIORITIES[b] ?? 99;
+    if (aPriority === bPriority) {
+      return a.localeCompare(b);
+    }
+    return aPriority - bPriority;
+  });
+}
+
+function formatModelStatusText() {
+  if (!modelStatusMap.size) {
+    return null;
+  }
+  const parts = sortModelKeys(modelStatusMap.keys()).map((key) => {
+    const status = modelStatusMap.get(key);
+    const label = MODEL_STATUS_LABELS[status] || status || '';
+    return `${labelForModel(key)}:${label}`;
+  });
+  return parts.join(' / ');
+}
+
 function updateModelInfo(statusText = null) {
   if (typeof statusText === 'string') {
     serverStatusText = statusText;
   }
-  const selectedLabels = [...selectedModels].map(labelForModel).join(', ') || '未選択';
-  if (infoEl) {
-    infoEl.textContent = `サーバー状態: ${serverStatusText} / 選択中: ${selectedLabels}`;
+  if (!infoEl) {
+    return;
   }
+
+  const statusSummary = formatModelStatusText();
+  if (statusSummary) {
+    infoEl.textContent = `サーバー状態: ${serverStatusText} / モデル進行状況: ${statusSummary}`;
+    return;
+  }
+
+  const selectedLabels = getSelectedModels().map(labelForModel).join(', ') || '未選択';
+  infoEl.textContent = `サーバー状態: ${serverStatusText} / 選択中: ${selectedLabels}`;
 }
 
 function persistModelSelection() {
@@ -144,11 +194,44 @@ function renderModelOptions() {
       option.appendChild(description);
     }
 
+    const statusKey = modelStatusMap.get(model.key);
+    if (statusKey) {
+      const statusBadge = document.createElement('span');
+      const className = MODEL_STATUS_CLASSES[statusKey] || 'pending';
+      statusBadge.className = `model-option-status model-status-${className}`;
+      statusBadge.textContent = MODEL_STATUS_LABELS[statusKey] || statusKey;
+      option.appendChild(statusBadge);
+    }
+
     fragment.appendChild(option);
   });
 
   modelOptionsEl.appendChild(fragment);
   updateModelInfo();
+}
+
+function resetModelStatuses(models) {
+  modelStatusMap = new Map();
+  sortModelKeys(models).forEach((key) => {
+    modelStatusMap.set(key, 'pending');
+  });
+  updateModelInfo();
+  renderModelOptions();
+}
+
+function setModelStatus(key, status) {
+  if (!key) {
+    return;
+  }
+  modelStatusMap.set(key, status);
+  updateModelInfo();
+  renderModelOptions();
+}
+
+function clearModelStatuses() {
+  modelStatusMap.clear();
+  updateModelInfo();
+  renderModelOptions();
 }
 
 function loadStoredModelSelection() {
@@ -168,12 +251,15 @@ function loadStoredModelSelection() {
 function ensureModelSelection() {
   selectedModels = new Set([...selectedModels].filter((model) => availableModels.some((item) => item.key === model)));
   if (!selectedModels.size && availableModels.length) {
-    selectedModels.add(availableModels[0].key);
+    const defaultModel = availableModels.find((item) => item.key === 'deepseek') || availableModels[0];
+    if (defaultModel) {
+      selectedModels.add(defaultModel.key);
+    }
   }
 }
 
 function getSelectedModels() {
-  return [...selectedModels];
+  return sortModelKeys(selectedModels);
 }
 
 async function fetchModels() {
@@ -190,16 +276,75 @@ async function fetchModels() {
   } catch (error) {
     console.warn('モデルリストの取得に失敗しました。既定値を使用します。', error);
     models = [
-      { key: 'deepseek', label: 'DeepSeek OCR', description: '' },
       { key: 'yomitoku', label: 'YomiToku Document Analyzer', description: '' },
+      { key: 'deepseek', label: 'DeepSeek OCR', description: '' },
+      { key: 'deepseek-4bit', label: 'DeepSeek OCR (4-bit Quantized)', description: 'BitsAndBytes 4-bit build (CUDA GPU required).' },
     ];
   }
+
+  models.sort((a, b) => {
+    const aPriority = MODEL_PRIORITIES[a.key] ?? 99;
+    const bPriority = MODEL_PRIORITIES[b.key] ?? 99;
+    if (aPriority === bPriority) {
+      return a.key.localeCompare(b.key);
+    }
+    return aPriority - bPriority;
+  });
 
   availableModels = models;
   ensureModelSelection();
   updateModelInfo('モデル一覧取得済み');
   renderModelOptions();
   persistModelSelection();
+}
+
+function isLikelyMathContent(source) {
+  if (!source) {
+    return false;
+  }
+
+  const text = source.trim();
+  if (!text) {
+    return false;
+  }
+
+  if (/\\begin\{[^}]+}/.test(text) || /\\[\[(]/.test(text)) {
+    return true;
+  }
+
+  let score = 0;
+
+  if (/\\[a-zA-Z]+/.test(text)) {
+    score += 2;
+  }
+
+  if (/[_^]\s*[({\[]?[-+0-9a-zA-Z\\]/.test(text)) {
+    score += 2;
+  } else if (/[_^]/.test(text)) {
+    score += 1;
+  }
+
+  if (/[=<>±≈≠≤≥]/.test(text)) {
+    score += 1;
+  }
+
+  if (/[0-9]/.test(text) && /[a-zA-Z]/.test(text)) {
+    score += 1;
+  }
+
+  if (/[∑∏√∞→←∀∃∂∫⊂⊆×·⋅∇]/.test(text)) {
+    score += 2;
+  }
+
+  if (/\\(frac|sum|int|operatorname|mathcal|mathbf|mathrm|left|right|cdot|times|pm|alpha|beta|gamma|delta|epsilon|theta|lambda|mu|nu|pi|rho|sigma|tau|phi|chi|psi|omega)/.test(text)) {
+    score += 2;
+  }
+
+  if (/\b(?:sin|cos|tan|log|exp|min|max)\b/i.test(text)) {
+    score += 1;
+  }
+
+  return score >= 3;
 }
 
 function sanitizeMathContent(source) {
@@ -525,16 +670,16 @@ function normalizeMathBlocks(markdown) {
 
   const pattern = /(^|\r?\n)([ \t]*)\[\s*([\s\S]*?)\s*\](?=\r?\n|$)/g;
   return markdown.replace(pattern, (match, prefix, indent, content) => {
-    if (!content || !/\\/.test(content)) {
-      return match;
-    }
-
-    const trimmed = content.trim();
-    if (!trimmed) {
+    const trimmed = (content ?? '').trim();
+    if (!trimmed || !isLikelyMathContent(trimmed)) {
       return match;
     }
 
     const cleaned = sanitizeMathContent(trimmed);
+    if (!cleaned) {
+      return match;
+    }
+
     return `${prefix}${indent}\\[\n${cleaned}\n${indent}\\]`;
   });
 }
@@ -566,7 +711,7 @@ function normalizeMathNodes(container) {
     }
 
     const text = node.textContent;
-    if (!text || (!text.includes('[') && !text.includes(']'))) {
+    if (!text) {
       continue;
     }
 
@@ -581,8 +726,13 @@ function normalizeMathNodes(container) {
       continue;
     }
 
-    const inner = sanitizeMathContent(trimmed.slice(1, -1).trim());
-    if (!inner || !inner.includes('\\')) {
+    const body = trimmed.slice(1, -1).trim();
+    if (!isLikelyMathContent(body)) {
+      continue;
+    }
+
+    const inner = sanitizeMathContent(body);
+    if (!inner) {
       continue;
     }
 
@@ -609,7 +759,7 @@ function normalizeMathElements(container) {
     }
 
     const trimmed = text.trim();
-    if (trimmed.length < 4 || !trimmed.endsWith(']') || !trimmed.includes('\\')) {
+    if (trimmed.length < 2 || (!trimmed.startsWith('[') && !trimmed.startsWith('\\['))) {
       return;
     }
 
@@ -622,12 +772,16 @@ function normalizeMathElements(container) {
       return;
     }
 
-    if (!body) {
+    if (!isLikelyMathContent(body)) {
+      return;
+    }
+
+    const cleaned = sanitizeMathContent(body);
+    if (!cleaned) {
       return;
     }
 
     const newline = text.includes('\r\n') ? '\r\n' : '\n';
-    const cleaned = sanitizeMathContent(body);
     element.textContent = `\\[${newline}${cleaned}${newline}\\]`;
   });
 }
@@ -672,7 +826,11 @@ function fallbackMathRender(container) {
     const hasExplicitDelim = text.includes('\\[') || text.includes('\\(');
     if (!hasExplicitDelim) {
       const trimmedCheck = text.trim();
-      if (!(trimmedCheck.startsWith('[') && trimmedCheck.endsWith(']') && trimmedCheck.includes('\\'))) {
+      let candidate = trimmedCheck;
+      if (trimmedCheck.startsWith('[') && trimmedCheck.endsWith(']')) {
+        candidate = trimmedCheck.slice(1, -1).trim();
+      }
+      if (!isLikelyMathContent(candidate)) {
         return;
       }
     }
@@ -697,28 +855,39 @@ function fallbackMathRender(container) {
 
     if (fragments.length === 0) {
       const trimmed = text.trim();
-      if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
-        const inner = sanitizeMathContent(trimmed.slice(1, -1).trim());
-        if (inner && inner.includes('\\')) {
-          try {
-            const html = katexLib.renderToString(inner, {
-              displayMode: true,
-              throwOnError: false,
-              strict: 'ignore',
-            });
-            const temp = doc.createElement('div');
-            temp.innerHTML = html;
-            const frag = doc.createDocumentFragment();
-            while (temp.firstChild) {
-              frag.appendChild(temp.firstChild);
-            }
-            const parent = node.parentNode;
-            parent.insertBefore(frag, node);
-            parent.removeChild(node);
-          } catch (error) {
-            console.error('KaTeX fallback render failed', error);
-          }
+      let candidate = trimmed;
+      if (trimmed.startsWith('\\[') && trimmed.endsWith('\\]')) {
+        candidate = trimmed.slice(2, -2).trim();
+      } else if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+        candidate = trimmed.slice(1, -1).trim();
+      }
+
+      if (!isLikelyMathContent(candidate)) {
+        return;
+      }
+
+      const inner = sanitizeMathContent(candidate);
+      if (!inner) {
+        return;
+      }
+
+      try {
+        const html = katexLib.renderToString(inner, {
+          displayMode: true,
+          throwOnError: false,
+          strict: 'ignore',
+        });
+        const temp = doc.createElement('div');
+        temp.innerHTML = html;
+        const frag = doc.createDocumentFragment();
+        while (temp.firstChild) {
+          frag.appendChild(temp.firstChild);
         }
+        const parent = node.parentNode;
+        parent.insertBefore(frag, node);
+        parent.removeChild(node);
+      } catch (error) {
+        console.error('KaTeX fallback render failed', error);
       }
       return;
     }
@@ -958,6 +1127,7 @@ function normalizeVariants(data) {
       previewUrl: variant.preview_image_url || null,
       metadata: variant.metadata || {},
       preview: variant.preview || '',
+      elapsedSeconds: typeof variant.elapsed_seconds === 'number' ? variant.elapsed_seconds : null,
     }));
   }
 
@@ -972,6 +1142,7 @@ function normalizeVariants(data) {
       previewUrl: data?.preview_image_url || null,
       metadata: data?.metadata || {},
       preview: data?.preview || '',
+      elapsedSeconds: typeof data?.metadata?.elapsed_seconds === 'number' ? data.metadata.elapsed_seconds : null,
     },
   ];
 }
@@ -1003,6 +1174,9 @@ function createVariantHeader(variant, context, extraMeta = '') {
   const metaParts = [];
   if (extraMeta) {
     metaParts.push(extraMeta);
+  }
+  if (typeof variant.elapsedSeconds === 'number') {
+    metaParts.push(`処理: ${variant.elapsedSeconds.toFixed(2)}秒`);
   }
   if (context.createdLabel && context.createdLabel !== '-') {
     metaParts.push(`作成: ${context.createdLabel}`);
@@ -1224,6 +1398,113 @@ function displayResult(data, filename, historyId = null, createdAt = null) {
   } else {
     updateTextCardsDisplay();
   }
+}
+
+function resetActiveAggregate(filename) {
+  activeAggregate = {
+    filename: filename || null,
+    variants: new Map(),
+    warnings: new Set(),
+    createdAt: null,
+    historyIds: [],
+  };
+}
+
+function ensureVariantObject(source, fallbackKey) {
+  const variant = {
+    model: source?.model || source?.key || fallbackKey,
+    label: source?.label || labelForModel(source?.model || source?.key || fallbackKey),
+    text_plain: source?.text_plain || source?.textPlain || '',
+    text_markdown: source?.text_markdown || source?.textMarkdown || '',
+    bounding_image_url: source?.bounding_image_url || source?.boundingUrl || null,
+    crops: Array.isArray(source?.crops) ? source.crops : [],
+    preview_image_url: source?.preview_image_url || source?.previewUrl || null,
+    preview: source?.preview || '',
+    metadata: source?.metadata || {},
+    elapsed_seconds: typeof source?.elapsed_seconds === 'number'
+      ? source.elapsed_seconds
+      : (typeof source?.metadata?.elapsed_seconds === 'number' ? source.metadata.elapsed_seconds : null),
+  };
+  return variant;
+}
+
+function mergeAggregateResponse(data, modelKey = null) {
+  if (!data) {
+    return;
+  }
+  if (!activeAggregate) {
+    resetActiveAggregate(data.filename || null);
+  }
+  if (!activeAggregate.filename && data.filename) {
+    activeAggregate.filename = data.filename;
+  }
+  if (!activeAggregate.createdAt && data.created_at) {
+    activeAggregate.createdAt = data.created_at;
+  }
+
+  const variants = Array.isArray(data.variants) ? data.variants : [];
+  variants.forEach((variant, index) => {
+    const key = variant?.model || variant?.key || modelKey || `model-${index}`;
+    if (!key) {
+      return;
+    }
+    activeAggregate.variants.set(key, ensureVariantObject(variant, key));
+  });
+
+  if (!activeAggregate.variants.size) {
+    const metadata = data?.metadata || {};
+    const fallbackKey = modelKey
+      || metadata.primary_model
+      || (Array.isArray(metadata.models) ? metadata.models[0] : null)
+      || data?.model
+      || 'deepseek';
+    activeAggregate.variants.set(fallbackKey, ensureVariantObject(data, fallbackKey));
+  }
+
+  const warnings = Array.isArray(data?.metadata?.warnings) ? data.metadata.warnings : [];
+  warnings.forEach((warning) => {
+    if (warning) {
+      activeAggregate.warnings.add(warning);
+    }
+  });
+
+  if (data.history_id) {
+    activeAggregate.historyIds.push(data.history_id);
+  }
+}
+
+function renderAggregateResult(fallbackFilename) {
+  if (!activeAggregate) {
+    return;
+  }
+
+  const orderedKeys = sortModelKeys(activeAggregate.variants.keys());
+  const variants = orderedKeys
+    .map((key, index) => {
+      const variant = activeAggregate.variants.get(key);
+      if (!variant) {
+        return null;
+      }
+      const resolvedKey = variant.model || variant.key || key || `model-${index}`;
+      return { ...variant, model: resolvedKey };
+    })
+    .filter(Boolean);
+
+  if (!variants.length) {
+    return;
+  }
+
+  const aggregatedData = {
+    filename: activeAggregate.filename || fallbackFilename || null,
+    created_at: activeAggregate.createdAt || null,
+    variants,
+    metadata: {
+      warnings: [...activeAggregate.warnings],
+    },
+  };
+
+  const historyId = activeAggregate.historyIds[activeAggregate.historyIds.length - 1] || null;
+  displayResult(aggregatedData, aggregatedData.filename || fallbackFilename, historyId, aggregatedData.created_at);
 }
 
 function updateTextCardsDisplay() {
@@ -1511,18 +1792,17 @@ function loadIcons() {
     .catch((err) => console.error('Failed to load icons', err));
 }
 
-async function uploadFile(item) {
-  setStatus(`${item.name} を解析中…`);
+async function uploadModelVariant(item, modelKey, promptValue) {
+  const label = labelForModel(modelKey);
   const formData = new FormData();
   formData.append('file', item.file);
-  const promptValue = promptInput?.value?.trim();
   if (promptValue) {
     formData.append('prompt', promptValue);
   }
-  const models = getSelectedModels();
-  if (models.length) {
-    formData.append('models', models.join(','));
-  }
+  formData.append('models', modelKey);
+
+  setModelStatus(modelKey, 'running');
+  setStatus(`${label} を解析中…`);
 
   try {
     const response = await fetch('/api/ocr', {
@@ -1536,18 +1816,51 @@ async function uploadFile(item) {
     }
 
     const data = await response.json();
-    displayResult(data, item.name, data.history_id, data.created_at);
+    mergeAggregateResponse(data, modelKey);
+    renderAggregateResult(item.name);
     if (data.history_id) {
       activeHistoryId = data.history_id;
     }
     await fetchHistory(false);
-    setStatus(`${item.name} の解析が完了しました。`);
+    setModelStatus(modelKey, 'success');
+    setStatus(`${label} の解析が完了しました。`);
     return true;
   } catch (error) {
     console.error(error);
-    setStatus(`${item.name} の解析に失敗しました: ${error.message}`, true);
+    setModelStatus(modelKey, 'error');
+    renderAggregateResult(item.name);
+    setStatus(`${label} の解析に失敗しました: ${error.message}`, true);
     return false;
   }
+}
+
+async function uploadFile(item) {
+  const models = getSelectedModels();
+  if (!models.length) {
+    setStatus('解析に使用するモデルが選択されていません。', true);
+    return false;
+  }
+
+  setStatus(`${item.name} を解析中…`);
+  resetActiveAggregate(item.name);
+  resetModelStatuses(models);
+
+  const promptValue = promptInput?.value?.trim() || '';
+  let overallSuccess = true;
+
+  for (const modelKey of models) {
+    const success = await uploadModelVariant(item, modelKey, promptValue);
+    if (!success) {
+      overallSuccess = false;
+    }
+  }
+
+  if (overallSuccess) {
+    setStatus(`${item.name} の解析が完了しました。`);
+  } else {
+    setStatus(`${item.name} の解析で一部のモデルが失敗しました。`, true);
+  }
+  return overallSuccess;
 }
 
 async function fetchHistory(autoSelect = true) {

@@ -1,7 +1,7 @@
 ## Web UI Manual Validation Checklist
 
-The following smoke tests confirm that both DeepSeek OCR and YomiToku are wired into the
-Dockerised Web UI.
+The following smoke tests confirm that DeepSeek OCR (full precision), DeepSeek OCR (4-bit Quantized),
+and YomiToku are wired into the Dockerised Web UI.
 
 ### Environment Preparation
 
@@ -23,6 +23,14 @@ Dockerised Web UI.
    - Bounding image (および切り出し画像がある場合)が 1 枚表示され、コピー/ダウンロードボタンが動作する。
 3. 履歴一覧に最新エントリが追加され、再選択で同じ結果が読み込める。
 
+### DeepSeek OCR (4-bit Quantized) のみ
+
+1. **DeepSeek OCR (4-bit Quantized)** のみをオンにする。
+2. 画像を投入し、以下を確認する:
+   - テキスト列に 4-bit モデルの結果が表示される。
+   - バウンディング画像・切り出し画像が生成され、フル精度版と同様に閲覧できる。
+   - 履歴に保存されたバリアントのメタデータに `quantized: true` と `model_repo: Jalea96/DeepSeek-OCR-bnb-4bit-NF4` が含まれ、`elapsed_seconds` が表示される。
+
 ### YomiToku のみ
 
 1. モデル選択で **YomiToku Document Analyzer** のみをオンにする。
@@ -30,13 +38,22 @@ Dockerised Web UI.
    - テキスト列に YomiToku の Markdown/プレーンテキストが表示される。
    - バウンディング画像が表示され、コピー/ダウンロードが成功する。
    - （表や図を含む文書の場合）切り出し画像が生成され、カード内で個別にコピー/ダウンロード可能。
+   - 「使用モデル」リストで YomiToku が最左に表示され、解析中は「処理中」バッジに更新される。
 
-### DeepSeek + YomiToku 並列
+### モデル進行状況表示
 
-1. 両モデルにチェックを入れ、同じ入力を解析する。
-2. テキスト/切り出し/バウンディング各セクションで 2 枚のカードが横並びになること、および
-   モデルごとに独立したコピー・ダウンロード操作ができることを確かめる。
-3. 履歴から再読み込みしても同じ構成で比較表示されることを確認する。
+1. DeepSeek OCR（フル精度）と DeepSeek 4-bit、YomiToku の 3 モデルを同時に選択した状態で画像を投入する。
+2. 解析開始直後に「使用モデル」欄の各モデルに `待機中` → `処理中` → `完了` の順でステータスバッジが表示されることを確認する。
+3. 処理時間の短い YomiToku が先に完了し、その結果カードが他モデルより先に描画されることを確認する。
+4. 各モデルの完了直後に出力カードが追加され、残りのモデルが完了するのを待たずに既に完了した結果を閲覧できる。
+
+### マルチモデル比較
+
+1. 3 つすべてのモデルにチェックを入れ、同じ入力を解析する。
+2. テキスト/切り出し/バウンディング各セクションで 3 枚のカードが横並びになることを確認する。
+   - 処理中は完了済みカードから順次レンダリングされる。
+3. DeepSeek / DeepSeek 4-bit / YomiToku の各列でコピー・ダウンロードが独立して動作することを確かめる。
+4. 履歴にはモデル単位のエントリが追加されるため、各モデルを個別に選択すると同じ内容が再現されることを確認する。
 
 ### エラーハンドリング
 
@@ -47,4 +64,3 @@ Dockerised Web UI.
 ### 後処理
 
 - `docker compose down -v` でコンテナを停止し、必要なら `/workspace/web_history` をクリーンアップする。
-

@@ -4,15 +4,17 @@ const assert = require('assert');
 const source = fs.readFileSync('app/static/main.js', 'utf8');
 
 const setMatch = source.match(/const MATH_LINEBREAK_ENVS = new Set\([\s\S]*?\);/);
+const ensureDisplayMatch = source.match(/function ensureDisplayMathLineBreaks\(math\) {([\s\S]*?)^}/m);
 const ensureMatch = source.match(/function ensureMathLineBreaks\(math\) {([\s\S]*?)^}/m);
 const sanitizeMatch = source.match(/function sanitizeMathContent\(source\) {([\s\S]*?)^}/m);
 
-if (!setMatch || !ensureMatch || !sanitizeMatch) {
+if (!setMatch || !ensureDisplayMatch || !ensureMatch || !sanitizeMatch) {
   throw new Error('failed to extract math helpers');
 }
 
 const buildModule = new Function(
   `${setMatch[0]}\n` +
+  `function ensureDisplayMathLineBreaks(math) {${ensureDisplayMatch[1]}}\n` +
   `function ensureMathLineBreaks(math) {${ensureMatch[1]}}\n` +
   `function sanitizeMathContent(source) {${sanitizeMatch[1]}}\n` +
   'return { sanitizeMathContent, ensureMathLineBreaks, MATH_LINEBREAK_ENVS };'

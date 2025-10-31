@@ -25,9 +25,10 @@
 
 ### Web UI のマルチモデル比較について
 
-- Docker イメージには `yomitoku>=0.8.0` を追加しており、DeepSeek OCR と並行して日本語特化の YomiToku Document Analyzer を利用できます。
-- 画面上部の「使用モデル」で DeepSeek / YomiToku のチェックボックスを切り替えると、選択したモデルのみで推論を行います。両方を選ぶと、テキスト / 切り出し画像 / バウンディング画像を横並びで比較できます。
-- 解析結果や履歴はモデル別に保存されるため、履歴から再読み込みした場合も同じ構成で比較表示されます。
+- Docker イメージには `yomitoku>=0.8.0` を追加しており、DeepSeek OCR（フル精度）に加えて日本語特化の YomiToku Document Analyzer を利用できます。
+- CUDA GPU 環境で `pip install -U bitsandbytes accelerate` を行うと、`Jalea96/DeepSeek-OCR-bnb-4bit-NF4`（BitsAndBytes 4-bit 量子化版）も選択肢に追加され、3 モデル併用による比較が可能です。
+- 画面上部の「使用モデル」で各チェックボックスを切り替えると、選択したモデルのみで推論を行います。複数選択時はテキスト / 切り出し画像 / バウンディング画像がモデル単位で並列表示されます。
+- 解析結果や履歴はモデル別に保存されるため、履歴からは各モデルを個別に再確認できます。
 - 手動の確認手順は [docs/manual_test_plan.md](docs/manual_test_plan.md) にまとめています。
 
 

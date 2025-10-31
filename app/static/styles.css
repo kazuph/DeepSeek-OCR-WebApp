@@ -248,6 +248,39 @@ h1 {
   line-height: 1.5;
 }
 
+.model-option-status {
+  grid-column: 1 / -1;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 999px;
+  padding: 2px 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 4px;
+  width: fit-content;
+}
+
+.model-status-pending {
+  background: rgba(158, 158, 158, 0.22);
+  color: #eceff1;
+}
+
+.model-status-running {
+  background: rgba(33, 150, 243, 0.25);
+  color: #90caf9;
+}
+
+.model-status-success {
+  background: rgba(76, 175, 80, 0.28);
+  color: #a5d6a7;
+}
+
+.model-status-error {
+  background: rgba(244, 67, 54, 0.28);
+  color: #ef9a9a;
+}
+
 .queue {
   margin-bottom: 16px;
   font-size: 14px;
