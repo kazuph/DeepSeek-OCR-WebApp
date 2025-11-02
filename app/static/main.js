@@ -24,8 +24,6 @@ const promptResetBtn = document.getElementById('prompt-reset');
 const defaultPrompt = promptInput?.defaultValue || '';
 const progressWrapper = document.getElementById('progress-wrapper');
 const progressBar = document.getElementById('progress-bar');
-const MAX_PREVIEW_COLUMNS = 5;
-const MAX_PREVIEW_ROWS = 2;
 const MODEL_PRIORITIES = {
   yomitoku: 0,
   deepseek: 1,
@@ -45,6 +43,68 @@ const MODEL_STATUS_CLASSES = {
 };
 
 const modelTimerHandles = new Map();
+
+function buildPlaceholderDataUrl(label) {
+  const safeLabel = (label || '').toUpperCase().replace(/[^A-Z0-9+]/g, '').slice(0, 6) || 'FILE';
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="140" height="100" viewBox="0 0 140 100" fill="none">
+    <rect x="3" y="3" width="134" height="94" rx="12" fill="rgba(255,255,255,0.08)" stroke="rgba(255,255,255,0.18)" stroke-width="3" />
+    <text x="50%" y="54%" dominant-baseline="middle" text-anchor="middle" font-size="32" font-family="'Segoe UI', sans-serif" fill="rgba(255,255,255,0.82)">${safeLabel}</text>
+  </svg>`;
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+}
+
+const FILE_PLACEHOLDER_IMAGE = buildPlaceholderDataUrl('FILE');
+const PDF_PLACEHOLDER_IMAGE = buildPlaceholderDataUrl('PDF');
+
+function isPdfFile(file) {
+  if (!file) return false;
+  const type = (file.type || '').toLowerCase();
+  if (type === 'application/pdf') {
+    return true;
+  }
+  const name = (file.name || '').toLowerCase();
+  return name.endsWith('.pdf');
+}
+
+function formatAggregateName(files) {
+  if (!files || !files.length) {
+    return 'upload';
+  }
+  const first = files[0].name || `upload-${Date.now()}`;
+  if (files.length === 1) {
+    return first;
+  }
+  return `${first} 他${files.length - 1}件`;
+}
+
+function createQueueItem(files) {
+  const normalized = Array.from(files || []).filter(Boolean);
+  if (!normalized.length) {
+    return null;
+  }
+  const id = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+  const previews = normalized.map((file, index) => {
+    const previewId = `${id}-${index}`;
+    const name = file.name || `upload-${index + 1}`;
+    const pdf = isPdfFile(file);
+    const url = pdf ? null : URL.createObjectURL(file);
+    return {
+      id: previewId,
+      name,
+      url,
+      status: '待機中',
+      type: pdf ? 'pdf' : 'image',
+    };
+  });
+
+  return {
+    id,
+    files: normalized,
+    name: formatAggregateName(normalized),
+    previewEntries: previews,
+    historyId: null,
+  };
+}
 
 function escapeCssIdentifier(value) {
   if (window.CSS && typeof window.CSS.escape === 'function') {
@@ -673,7 +733,7 @@ function setHistoryInputImages(images, fallbackName = 'ocr', historyId = 'histor
         id: `history-${historyId}-${identifier}`,
         name: baseName,
         url: image.url,
-        status: '履歴',
+        status: '完了',
         order: index,
       });
     });
@@ -742,20 +802,33 @@ function applyHistoryModelStatuses(variants) {
   renderModelOptions();
 }
 
-function pruneInputPreviews() {
-  const activeIds = new Set();
-  if (currentItem) {
-    activeIds.add(currentItem.id);
-  }
-  queue.forEach((item) => activeIds.add(item.id));
-
-  while (inputPreviews.length > 12) {
-    const removableIndex = inputPreviews.findIndex((entry) => !activeIds.has(entry.id));
-    if (removableIndex === -1) {
-      break;
+function dedupeInputPreviews() {
+  const seen = new Set();
+  for (let index = inputPreviews.length - 1; index >= 0; index -= 1) {
+    const entry = inputPreviews[index];
+    if (!entry || !entry.id) {
+      inputPreviews.splice(index, 1);
+      continue;
     }
-    const [removed] = inputPreviews.splice(removableIndex, 1);
-    if (removed?.url) {
+    if (seen.has(entry.id)) {
+      const [removed] = inputPreviews.splice(index, 1);
+      if (removed?.url && removed.url.startsWith('blob:')) {
+        URL.revokeObjectURL(removed.url);
+      }
+      continue;
+    }
+    seen.add(entry.id);
+  }
+}
+
+function clearLiveInputPreviews() {
+  for (let index = inputPreviews.length - 1; index >= 0; index -= 1) {
+    const entry = inputPreviews[index];
+    if (!entry || entry.status === '履歴') {
+      continue;
+    }
+    const [removed] = inputPreviews.splice(index, 1);
+    if (removed?.url && removed.url.startsWith('blob:')) {
       URL.revokeObjectURL(removed.url);
     }
   }
@@ -763,7 +836,7 @@ function pruneInputPreviews() {
 
 function renderPreviews() {
   if (!inputPreviewSection || !inputPreviewGrid) return;
-  pruneInputPreviews();
+  dedupeInputPreviews();
 
   const historyItems = historyInputImages
     .slice()
@@ -775,8 +848,7 @@ function renderPreviews() {
     .map((entry, index) => ({ ...entry, renderOrder: historyItems.length + index }));
 
   const combined = [...historyItems, ...currentItems];
-  const visibleItems = combined.slice(0, MAX_PREVIEW_COLUMNS * MAX_PREVIEW_ROWS);
-  const hasItems = visibleItems.length > 0;
+  const hasItems = combined.length > 0;
   inputPreviewSection.classList.toggle('hidden', !hasItems);
 
   if (!hasItems) {
@@ -786,7 +858,7 @@ function renderPreviews() {
 
   const fragment = document.createDocumentFragment();
 
-  visibleItems.forEach((entry, index) => {
+  combined.forEach((entry) => {
     const item = document.createElement('div');
     item.className = 'preview-item';
     if (entry.status) {
@@ -794,11 +866,6 @@ function renderPreviews() {
     } else if (item.dataset.status) {
       delete item.dataset.status;
     }
-
-    const columnIndex = (index % MAX_PREVIEW_COLUMNS) + 1;
-    const rowIndex = Math.floor(index / MAX_PREVIEW_COLUMNS) + 1;
-    item.style.gridColumn = String(columnIndex);
-    item.style.gridRow = String(rowIndex);
 
     if (entry.status) {
       const badge = document.createElement('span');
@@ -808,17 +875,19 @@ function renderPreviews() {
     }
 
     const img = document.createElement('img');
-    img.src = entry.url;
-    img.alt = `${entry.name} プレビュー`;
+    img.src = entry.url || FILE_PLACEHOLDER_IMAGE;
+    img.alt = `${entry.name || '入力画像'} プレビュー`;
     img.className = 'preview-thumb';
-    img.addEventListener('click', () => {
-      openModal({ type: 'input', url: entry.url, name: entry.name });
-    });
+    if (entry.url) {
+      img.addEventListener('click', () => {
+        openModal({ type: 'input', url: entry.url, name: entry.name });
+      });
+    }
     item.appendChild(img);
 
     const label = document.createElement('div');
     label.className = 'preview-label';
-    label.textContent = entry.name;
+    label.textContent = entry.name || '入力画像';
     item.appendChild(label);
 
     fragment.appendChild(item);
@@ -828,17 +897,19 @@ function renderPreviews() {
   inputPreviewGrid.appendChild(fragment);
 }
 
-function addInputPreview({ id, name, url, status }) {
-  if (!id || !url) return;
+function addInputPreview({ id, name, url, status, type }) {
+  if (!id) return;
+  const previewUrl = url || (type === 'pdf' ? PDF_PLACEHOLDER_IMAGE : FILE_PLACEHOLDER_IMAGE);
   const existing = findPreview(id);
   if (existing) {
     existing.status = status;
     existing.name = name;
+    existing.url = previewUrl;
     renderPreviews();
     return;
   }
 
-  inputPreviews.push({ id, name, url, status, addedAt: Date.now() });
+  inputPreviews.push({ id, name, url: previewUrl, status, type, addedAt: Date.now() });
   renderPreviews();
 }
 
@@ -846,6 +917,51 @@ function updatePreviewStatus(id, status) {
   const entry = findPreview(id);
   if (!entry) return;
   entry.status = status;
+  renderPreviews();
+}
+
+function updateQueueItemPreviewStatus(item, status) {
+  if (!item || !Array.isArray(item.previewEntries)) {
+    return;
+  }
+  let mutated = false;
+  item.previewEntries.forEach((preview) => {
+    if (!preview) return;
+    preview.status = status;
+    const entry = findPreview(preview.id);
+    if (entry) {
+      entry.status = status;
+      mutated = true;
+    }
+  });
+  if (mutated) {
+    renderPreviews();
+  }
+}
+
+function removeQueueItemPreviews(item) {
+  if (!item || !Array.isArray(item.previewEntries)) {
+    return;
+  }
+  const targetIds = new Set(
+    item.previewEntries
+      .map((preview) => preview?.id)
+      .filter((value) => typeof value === 'string')
+  );
+  if (!targetIds.size) {
+    return;
+  }
+  for (let index = inputPreviews.length - 1; index >= 0; index -= 1) {
+    const entry = inputPreviews[index];
+    if (!entry || !targetIds.has(entry.id)) {
+      continue;
+    }
+    const [removed] = inputPreviews.splice(index, 1);
+    if (removed?.url && removed.url.startsWith('blob:')) {
+      URL.revokeObjectURL(removed.url);
+    }
+  }
+  item.previewEntries = [];
   renderPreviews();
 }
 
@@ -1368,6 +1484,30 @@ function deriveBaseName(name) {
   return trimmed.replace(/\.[^.]+$/, '');
 }
 
+function normalizeBoundingImages(images, fallbackUrl = null, label = 'bounding') {
+  const result = [];
+  if (Array.isArray(images)) {
+    images.forEach((item, index) => {
+      if (!item) return;
+      const url = item.url || null;
+      if (!url) return;
+      const name = item.name || `${label || 'bounding'}-${index + 1}`;
+      const path = item.path || url;
+      result.push({ name, path, url });
+    });
+  }
+
+  if (!result.length && fallbackUrl) {
+    result.push({
+      name: `${label || 'bounding'}-1`,
+      path: fallbackUrl,
+      url: fallbackUrl,
+    });
+  }
+
+  return result;
+}
+
 function normalizeVariants(data) {
   if (Array.isArray(data?.variants) && data.variants.length) {
     return data.variants.map((variant, index) => ({
@@ -1376,6 +1516,7 @@ function normalizeVariants(data) {
       textPlain: variant.text_plain || '',
       textMarkdown: variant.text_markdown || '',
       boundingUrl: variant.bounding_image_url || null,
+      boundingImages: normalizeBoundingImages(variant.bounding_images, variant.bounding_image_url, variant.label),
       crops: Array.isArray(variant.crops) ? variant.crops : [],
       previewUrl: variant.preview_image_url || null,
       metadata: variant.metadata || {},
@@ -1391,6 +1532,7 @@ function normalizeVariants(data) {
       textPlain: data?.text_plain || '',
       textMarkdown: data?.text_markdown || '',
       boundingUrl: data?.bounding_image_url || null,
+      boundingImages: normalizeBoundingImages(data?.bounding_images, data?.bounding_image_url, data?.metadata?.model_label || data?.metadata?.model),
       crops: Array.isArray(data?.crops) ? data.crops : [],
       previewUrl: data?.preview_image_url || null,
       metadata: data?.metadata || {},
@@ -1578,38 +1720,125 @@ function renderBoundingVariants(variants, context) {
     card.className = 'variant-card bounding-card';
     card.dataset.model = variant.key;
 
-    const header = createVariantHeader(variant, context);
+    const boundingImages = Array.isArray(variant.boundingImages)
+      ? variant.boundingImages
+      : normalizeBoundingImages(variant.bounding_images, variant.boundingUrl, variant.label);
+
+    const header = createVariantHeader(
+      variant,
+      context,
+      boundingImages.length ? `バウンディング: ${boundingImages.length}件` : ''
+    );
     card.appendChild(header);
 
-    const actions = document.createElement('div');
-    actions.className = 'variant-card-actions';
-
-    const body = document.createElement('div');
-    body.className = 'variant-card-content';
-
-    if (variant.boundingUrl) {
-      const image = document.createElement('img');
-      image.className = 'bounding-image';
-      image.src = variant.boundingUrl;
-      image.alt = `${variant.label} のバウンディング画像`;
-      image.addEventListener('click', () => openModal({ type: 'bounding', url: variant.boundingUrl, name: `${context.downloadBase}-${variant.key}-bounding` }));
-
-      actions.appendChild(createIconButton('copy', 'バウンディング画像をコピー', () => copyImageToClipboard(variant.boundingUrl).then(() => setStatus('バウンディング画像をコピーしました。')).catch(() => setStatus('画像をコピーできませんでした。', true))));
-
-      actions.appendChild(createIconButton('download', 'バウンディング画像をDL', () => {
-        const ext = inferExtensionFromDataUrl(variant.boundingUrl, 'jpg');
-        downloadDataUrl(variant.boundingUrl, `${context.downloadBase}-${variant.key}-bounding.${ext}`);
-      }));
-
-      body.appendChild(image);
-    } else {
+    if (!boundingImages.length) {
       const empty = document.createElement('p');
       empty.className = 'metadata';
       empty.textContent = 'バウンディング画像は生成されませんでした。';
-      body.appendChild(empty);
+      card.appendChild(empty);
+      boundingVariantGrid.appendChild(card);
+      return;
     }
 
-    card.append(actions, body);
+    let currentIndex = 0;
+
+    const viewer = document.createElement('div');
+    viewer.className = 'bounding-carousel';
+
+    const frame = document.createElement('div');
+    frame.className = 'bounding-frame';
+
+    const image = document.createElement('img');
+    image.className = 'bounding-image';
+    frame.appendChild(image);
+
+    frame.addEventListener('click', () => {
+      const current = boundingImages[currentIndex];
+      if (!current || !current.url) return;
+      openModal({
+        type: 'bounding',
+        url: current.url,
+        name: current.name || `${context.downloadBase}-${variant.key}-bounding-${currentIndex + 1}`,
+      });
+    });
+
+    const indicator = document.createElement('div');
+    indicator.className = 'bounding-indicator';
+
+    const actions = document.createElement('div');
+    actions.className = 'variant-card-actions bounding-actions';
+
+    const copyBtn = createIconButton('copy', 'バウンディング画像をコピー', async () => {
+      const current = boundingImages[currentIndex];
+      if (!current || !current.url) return;
+      try {
+        await copyImageToClipboard(current.url);
+        setStatus('バウンディング画像をコピーしました。');
+      } catch (error) {
+        console.error(error);
+        setStatus('画像をコピーできませんでした。', true);
+      }
+    });
+
+    const downloadBtn = createIconButton('download', 'バウンディング画像をDL', () => {
+      const current = boundingImages[currentIndex];
+      if (!current || !current.url) return;
+      const ext = inferExtensionFromDataUrl(current.url, 'jpg');
+      downloadDataUrl(current.url, `${context.downloadBase}-${variant.key}-bounding-${currentIndex + 1}.${ext}`);
+    });
+
+    actions.append(copyBtn, downloadBtn);
+
+    const nav = document.createElement('div');
+    nav.className = 'bounding-nav';
+
+    const prevBtn = document.createElement('button');
+    prevBtn.type = 'button';
+    prevBtn.className = 'button secondary mini nav-button';
+    prevBtn.textContent = '← 前へ';
+
+    const nextBtn = document.createElement('button');
+    nextBtn.type = 'button';
+    nextBtn.className = 'button secondary mini nav-button';
+    nextBtn.textContent = '次へ →';
+
+    nav.append(prevBtn, indicator, nextBtn);
+
+    const updateViewer = (index) => {
+      const total = boundingImages.length;
+      if (!total) {
+        image.src = '';
+        indicator.textContent = '';
+        prevBtn.disabled = true;
+        nextBtn.disabled = true;
+        return;
+      }
+      const bounded = Math.max(0, Math.min(index, total - 1));
+      currentIndex = bounded;
+      const current = boundingImages[currentIndex];
+      image.src = current?.url || '';
+      image.alt = `${variant.label} のバウンディング画像 ${currentIndex + 1}/${total}`;
+      indicator.textContent = `${currentIndex + 1} / ${total}`;
+      prevBtn.disabled = currentIndex === 0;
+      nextBtn.disabled = currentIndex === total - 1;
+    };
+
+    prevBtn.addEventListener('click', () => {
+      if (currentIndex <= 0) return;
+      updateViewer(currentIndex - 1);
+    });
+
+    nextBtn.addEventListener('click', () => {
+      if (currentIndex >= boundingImages.length - 1) return;
+      updateViewer(currentIndex + 1);
+    });
+
+    viewer.append(frame, nav);
+
+    card.append(viewer, actions);
+
+    updateViewer(0);
+
     boundingVariantGrid.appendChild(card);
   });
 }
@@ -1667,16 +1896,28 @@ function resetActiveAggregate(filename) {
     warnings: new Set(),
     createdAt: null,
     historyIds: [],
+    inputImages: [],
   };
 }
 
 function ensureVariantObject(source, fallbackKey) {
+  const modelKey = source?.model || source?.key || fallbackKey;
+  const label = source?.label || labelForModel(modelKey);
+  const boundingUrlSource = source?.bounding_image_url || source?.boundingUrl || null;
+  const boundingImages = normalizeBoundingImages(
+    source?.bounding_images || source?.boundingImages,
+    boundingUrlSource,
+    label
+  );
+  const resolvedBoundingUrl = boundingUrlSource || (boundingImages.length ? boundingImages[0].url : null);
+
   const variant = {
-    model: source?.model || source?.key || fallbackKey,
-    label: source?.label || labelForModel(source?.model || source?.key || fallbackKey),
+    model: modelKey,
+    label,
     text_plain: source?.text_plain || source?.textPlain || '',
     text_markdown: source?.text_markdown || source?.textMarkdown || '',
-    bounding_image_url: source?.bounding_image_url || source?.boundingUrl || null,
+    bounding_image_url: resolvedBoundingUrl,
+    bounding_images: boundingImages,
     crops: Array.isArray(source?.crops) ? source.crops : [],
     preview_image_url: source?.preview_image_url || source?.previewUrl || null,
     preview: source?.preview || '',
@@ -1733,6 +1974,10 @@ function mergeAggregateResponse(data, modelKey = null) {
       activeAggregate.historyIds.push(data.history_id);
     }
   }
+
+  if (Array.isArray(data.input_images)) {
+    activeAggregate.inputImages = data.input_images;
+  }
 }
 
 function renderAggregateResult(fallbackFilename) {
@@ -1763,6 +2008,7 @@ function renderAggregateResult(fallbackFilename) {
     metadata: {
       warnings: [...activeAggregate.warnings],
     },
+    input_images: activeAggregate.inputImages || [],
   };
 
   const historyId = activeAggregate.historyIds[activeAggregate.historyIds.length - 1] || null;
@@ -1823,21 +2069,34 @@ function downloadVariantText(variant, filenameBase) {
   downloadTextFile(text, filename, mime);
 }
 function handleFiles(files) {
-  if (!files || files.length === 0) {
+  const normalized = Array.from(files || []).filter(Boolean);
+  if (!normalized.length) {
     return;
   }
-  Array.from(files).forEach((file) => {
-    const id = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
-    const name = file.name || `upload-${Date.now()}`;
-    const previewUrl = URL.createObjectURL(file);
-    queue.push({
-      id,
-      file,
-      name,
-      previewUrl,
-      historyId: null,
+  if (currentItem) {
+    removeQueueItemPreviews(currentItem);
+  }
+  if (queue.length) {
+    queue.forEach(removeQueueItemPreviews);
+  }
+  clearLiveInputPreviews();
+  renderPreviews();
+
+  clearHistoryInputImages();
+
+  const item = createQueueItem(normalized);
+  if (!item) {
+    return;
+  }
+  queue.push(item);
+  item.previewEntries.forEach((preview) => {
+    addInputPreview({
+      id: preview.id,
+      name: preview.name,
+      url: preview.url,
+      status: preview.status,
+      type: preview.type,
     });
-    addInputPreview({ id, name, url: previewUrl, status: '待機中' });
   });
   updateQueueStatus();
   processQueue();
@@ -1849,18 +2108,19 @@ async function processQueue() {
   }
   processing = true;
   currentItem = queue.shift() || null;
-  if (currentItem?.id) {
-    updatePreviewStatus(currentItem.id, '処理中');
+  if (currentItem) {
+    updateQueueItemPreviewStatus(currentItem, '処理中');
   }
   const sessionId = startFakeProgress();
   updateQueueStatus();
 
   if (currentItem) {
     const success = await uploadFile(currentItem);
-    if (currentItem.id) {
-      updatePreviewStatus(currentItem.id, success ? '完了' : '失敗');
-    }
+    updateQueueItemPreviewStatus(currentItem, success ? '完了' : '失敗');
     settleProgress(sessionId, success);
+    if (success) {
+      removeQueueItemPreviews(currentItem);
+    }
   }
 
   processing = false;
@@ -1897,25 +2157,18 @@ window.addEventListener('paste', (event) => {
   if (!items) {
     return;
   }
+  const files = [];
   for (const item of items) {
     if (item.kind === 'file') {
       const file = item.getAsFile();
       if (file) {
-        const id = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
-        const name = file.name || `paste-${Date.now()}`;
-        const previewUrl = URL.createObjectURL(file);
-        queue.push({
-          id,
-          file,
-          name,
-          previewUrl,
-        });
-        addInputPreview({ id, name, url: previewUrl, status: '待機中' });
+        files.push(file);
       }
     }
   }
-  updateQueueStatus();
-  processQueue();
+  if (files.length) {
+    handleFiles(files);
+  }
 });
 
 function setTab(mode) {
@@ -2058,7 +2311,9 @@ function loadIcons() {
 async function uploadModelVariant(item, modelKey, promptValue) {
   const label = labelForModel(modelKey);
   const formData = new FormData();
-  formData.append('file', item.file);
+  (item.files || []).forEach((file) => {
+    formData.append('files', file);
+  });
   if (promptValue) {
     formData.append('prompt', promptValue);
   }

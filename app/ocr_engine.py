@@ -13,7 +13,7 @@ import tempfile
 import time
 import uuid
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence
@@ -106,11 +106,20 @@ class OCRVariantArtifacts:
     text_markdown: str
     artifact_dir: Path
     text_path: Path
-    bounding_image: Optional[Path]
-    crop_images: List[Path]
-    preview_text: str
-    preview_image: Optional[Path]
+    bounding_image: Optional[Path] = None
+    crop_images: List[Path] = field(default_factory=list)
+    bounding_images: List[Path] = field(default_factory=list)
+    preview_text: str = ""
+    preview_image: Optional[Path] = None
     extras: Dict[str, object] | None = None
+
+
+@dataclass
+class InputSnapshot:
+    """Represents an input image stored for history playback."""
+
+    name: str
+    path: Path
 
 
 WEB_HISTORY_DIR = Path(os.getenv("OCR_HISTORY_DIR", "/workspace/web_history"))
@@ -188,6 +197,31 @@ def collect_image_paths(inputs: Iterable[Path], work_dir: Path) -> List[Path]:
         raise RuntimeError("No image inputs detected")
 
     return collected
+
+
+def _unique_filename(name: str, used: set[str], fallback: str) -> str:
+    """Return a sanitized filename unique within ``used``."""
+
+    candidate = Path(name).name or fallback
+    if not candidate:
+        candidate = fallback
+
+    # Collapse whitespace and disallow path separators
+    candidate = re.sub(r"[\s]+", "_", candidate)
+    candidate = candidate.replace("/", "_").replace("\\", "_")
+
+    stem, suffix = os.path.splitext(candidate)
+    if not suffix:
+        suffix = ""
+    normalized_key = candidate.lower()
+    counter = 2
+    while normalized_key in used:
+        candidate = f"{stem}_{counter}{suffix}"
+        normalized_key = candidate.lower()
+        counter += 1
+
+    used.add(normalized_key)
+    return candidate
 
 
 def as_text(result: object) -> str:
@@ -568,7 +602,7 @@ def _yomitoku_plain_from_results(results) -> str:
 
 
 def _run_deepseek_variant(
-    input_path: Path,
+    input_paths: Sequence[Path],
     work_dir: Path,
     *,
     model_name: str,
@@ -579,7 +613,7 @@ def _run_deepseek_variant(
     attn_impl: str,
 ) -> OCRVariantArtifacts:
     results = run_ocr_documents(
-        [input_path],
+        input_paths,
         work_dir,
         model_name=model_name,
         prompt=prompt,
@@ -592,36 +626,71 @@ def _run_deepseek_variant(
     if not results:
         raise RuntimeError("DeepSeek OCR produced no output")
 
-    doc = results[0]
     descriptor = _descriptor_for("deepseek")
 
-    bounding_path: Optional[Path] = None
-    for candidate in ("result_with_boxes.jpg", "result_with_boxes.png"):
-        candidate_path = doc.artifact_dir / candidate
-        if candidate_path.exists():
-            bounding_path = candidate_path
-            break
+    artifact_root = work_dir / "artifacts"
+    text_root = work_dir / "texts"
 
+    combined_markdown_segments: List[str] = []
+    combined_plain_segments: List[str] = []
     crop_paths: List[Path] = []
-    images_dir = doc.artifact_dir / "images"
-    if images_dir.exists():
-        crop_paths = sorted([p for p in images_dir.iterdir() if p.is_file()])
+    bounding_path: Optional[Path] = None
+    bounding_paths: List[Path] = []
+    preview_image: Optional[Path] = None
 
-    preview_image = bounding_path or (crop_paths[0] if crop_paths else None)
-    preview_text = _trim_preview(doc.text_markdown, doc.text_plain)
+    for doc in results:
+        if doc.text_markdown:
+            combined_markdown_segments.append(doc.text_markdown.strip())
+        if doc.text_plain:
+            combined_plain_segments.append(doc.text_plain.strip())
+
+        page_bounding: Optional[Path] = None
+        for candidate in ("result_with_boxes.jpg", "result_with_boxes.png"):
+            candidate_path = doc.artifact_dir / candidate
+            if candidate_path.exists():
+                page_bounding = candidate_path
+                if bounding_path is None:
+                    bounding_path = candidate_path
+                if preview_image is None:
+                    preview_image = candidate_path
+                bounding_paths.append(candidate_path)
+                break
+
+        images_dir = doc.artifact_dir / "images"
+        if images_dir.exists():
+            crop_paths.extend(sorted(p for p in images_dir.iterdir() if p.is_file()))
+
+    combined_markdown = "\n\n".join(segment for segment in combined_markdown_segments if segment).strip()
+    combined_plain = "\n\n".join(segment for segment in combined_plain_segments if segment).strip()
+    if not combined_plain and combined_markdown:
+        combined_plain = _markdown_to_plain_text(combined_markdown)
+
+    text_root.mkdir(parents=True, exist_ok=True)
+    combined_text_path = text_root / "combined.md"
+    combined_text_path.write_text(combined_markdown, encoding="utf-8")
+
+    if preview_image is None and crop_paths:
+        preview_image = crop_paths[-1]
+    if preview_image is None:
+        preview_image = bounding_path
+
+    preview_text = _trim_preview(combined_markdown, combined_plain)
+
+    extras = {"attn_impl": attn_impl, "documents": len(results)}
 
     return OCRVariantArtifacts(
         key=descriptor.key,
         label=descriptor.label,
-        text_plain=doc.text_plain,
-        text_markdown=doc.text_markdown,
-        artifact_dir=doc.artifact_dir,
-        text_path=doc.text_path,
+        text_plain=combined_plain,
+        text_markdown=combined_markdown,
+        artifact_dir=artifact_root,
+        text_path=combined_text_path,
         bounding_image=bounding_path,
+        bounding_images=bounding_paths,
         crop_images=crop_paths,
         preview_text=preview_text,
         preview_image=preview_image,
-        extras={"attn_impl": attn_impl},
+        extras=extras,
     )
 
 # def _run_8bit_deepseek_variant(...):
@@ -629,7 +698,7 @@ def _run_deepseek_variant(
 
 
 def _run_quantized_deepseek_variant(
-    input_path: Path,
+    input_paths: Sequence[Path],
     work_dir: Path,
     *,
     prompt: str,
@@ -639,7 +708,7 @@ def _run_quantized_deepseek_variant(
     attn_impl: str,
 ) -> OCRVariantArtifacts:
     results = run_ocr_documents(
-        [input_path],
+        input_paths,
         work_dir,
         model_name=QUANTIZED_MODEL_NAME,
         prompt=prompt,
@@ -652,36 +721,76 @@ def _run_quantized_deepseek_variant(
     if not results:
         raise RuntimeError("DeepSeek OCR (4-bit Quantized) produced no output")
 
-    doc = results[0]
     descriptor = _descriptor_for("deepseek-4bit")
 
-    bounding_path: Optional[Path] = None
-    for candidate in ("result_with_boxes.jpg", "result_with_boxes.png"):
-        candidate_path = doc.artifact_dir / candidate
-        if candidate_path.exists():
-            bounding_path = candidate_path
-            break
+    artifact_root = work_dir / "artifacts"
+    text_root = work_dir / "texts"
 
+    combined_markdown_segments: List[str] = []
+    combined_plain_segments: List[str] = []
     crop_paths: List[Path] = []
-    images_dir = doc.artifact_dir / "images"
-    if images_dir.exists():
-        crop_paths = sorted([p for p in images_dir.iterdir() if p.is_file()])
+    bounding_path: Optional[Path] = None
+    bounding_paths: List[Path] = []
+    preview_image: Optional[Path] = None
 
-    preview_image = bounding_path or (crop_paths[0] if crop_paths else None)
-    preview_text = _trim_preview(doc.text_markdown, doc.text_plain)
+    for doc in results:
+        if doc.text_markdown:
+            combined_markdown_segments.append(doc.text_markdown.strip())
+        if doc.text_plain:
+            combined_plain_segments.append(doc.text_plain.strip())
+
+        page_bounding: Optional[Path] = None
+        for candidate in ("result_with_boxes.jpg", "result_with_boxes.png"):
+            candidate_path = doc.artifact_dir / candidate
+            if candidate_path.exists():
+                page_bounding = candidate_path
+                if bounding_path is None:
+                    bounding_path = candidate_path
+                if preview_image is None:
+                    preview_image = candidate_path
+                bounding_paths.append(candidate_path)
+                break
+
+        images_dir = doc.artifact_dir / "images"
+        if images_dir.exists():
+            crop_paths.extend(sorted(p for p in images_dir.iterdir() if p.is_file()))
+
+    combined_markdown = "\n\n".join(segment for segment in combined_markdown_segments if segment).strip()
+    combined_plain = "\n\n".join(segment for segment in combined_plain_segments if segment).strip()
+    if not combined_plain and combined_markdown:
+        combined_plain = _markdown_to_plain_text(combined_markdown)
+
+    text_root.mkdir(parents=True, exist_ok=True)
+    combined_text_path = text_root / "combined.md"
+    combined_text_path.write_text(combined_markdown, encoding="utf-8")
+
+    if preview_image is None and crop_paths:
+        preview_image = crop_paths[-1]
+    if preview_image is None:
+        preview_image = bounding_path
+
+    preview_text = _trim_preview(combined_markdown, combined_plain)
+
+    extras = {
+        "attn_impl": attn_impl,
+        "quantized": True,
+        "model_repo": QUANTIZED_MODEL_NAME,
+        "documents": len(results),
+    }
 
     return OCRVariantArtifacts(
         key=descriptor.key,
         label=descriptor.label,
-        text_plain=doc.text_plain,
-        text_markdown=doc.text_markdown,
-        artifact_dir=doc.artifact_dir,
-        text_path=doc.text_path,
+        text_plain=combined_plain,
+        text_markdown=combined_markdown,
+        artifact_dir=artifact_root,
+        text_path=combined_text_path,
         bounding_image=bounding_path,
+        bounding_images=bounding_paths,
         crop_images=crop_paths,
         preview_text=preview_text,
         preview_image=preview_image,
-        extras={"attn_impl": attn_impl, "quantized": True, "model_repo": QUANTIZED_MODEL_NAME},
+        extras=extras,
     )
 
 
@@ -700,11 +809,10 @@ def _rewrite_yomitoku_markdown_links(markdown: str, figures_dir: Path) -> str:
     return updated
 
 
-def _run_yomitoku_variant(input_path: Path, work_dir: Path) -> OCRVariantArtifacts:
+def _run_yomitoku_variant(input_paths: Sequence[Path], work_dir: Path) -> OCRVariantArtifacts:
     _require_cv2()
     device = _get_device()
     analyzer = _get_yomitoku_analyzer(device)
-    pages = _load_yomitoku_pages(input_path)
 
     work_dir.mkdir(parents=True, exist_ok=True)
     artifact_root = work_dir / "artifacts"
@@ -717,54 +825,62 @@ def _run_yomitoku_variant(input_path: Path, work_dir: Path) -> OCRVariantArtifac
     plain_segments: List[str] = []
     crop_paths: List[Path] = []
     bounding_path: Optional[Path] = None
+    bounding_paths: List[Path] = []
     preview_image: Optional[Path] = None
 
     executor = _get_yomitoku_executor()
+    total_pages = 0
 
-    for index, image in enumerate(pages, start=1):
-        future = executor.submit(analyzer, image)
-        results, ocr_vis, _ = future.result()
-        page_slug = f"{input_path.stem}_page{index:02d}"
-        page_text_path = text_root / f"{page_slug}.md"
-        figures_dir = artifact_root / "figures" / page_slug
-        figures_dir.mkdir(parents=True, exist_ok=True)
-        markdown_text = results.to_markdown(  # type: ignore[attr-defined]
-            str(page_text_path),
-            img=image,
-            figure_dir=str(figures_dir),
-        )
-        markdown_text = _rewrite_yomitoku_markdown_links(markdown_text, figures_dir)
-        markdown_segments.append(markdown_text.strip())
+    for input_path in input_paths:
+        pages = _load_yomitoku_pages(input_path)
+        for page_index, image in enumerate(pages, start=1):
+            total_pages += 1
+            future = executor.submit(analyzer, image)
+            results, ocr_vis, _ = future.result()
+            page_slug = f"{input_path.stem}_page{page_index:02d}"
+            page_text_path = text_root / f"{page_slug}.md"
+            figures_dir = artifact_root / "figures" / page_slug
+            figures_dir.mkdir(parents=True, exist_ok=True)
+            markdown_text = results.to_markdown(  # type: ignore[attr-defined]
+                str(page_text_path),
+                img=image,
+                figure_dir=str(figures_dir),
+            )
+            markdown_text = _rewrite_yomitoku_markdown_links(markdown_text, figures_dir)
+            markdown_segments.append(markdown_text.strip())
 
-        plain_markdown = _markdown_to_plain_text(markdown_text)
-        if plain_markdown:
-            plain_segments.append(plain_markdown)
-        else:
-            extracted_plain = _yomitoku_plain_from_results(results)
-            if extracted_plain:
-                plain_segments.append(extracted_plain)
+            plain_markdown = _markdown_to_plain_text(markdown_text)
+            if plain_markdown:
+                plain_segments.append(plain_markdown)
+            else:
+                extracted_plain = _yomitoku_plain_from_results(results)
+                if extracted_plain:
+                    plain_segments.append(extracted_plain)
 
-        if ocr_vis is not None:
-            page_bounding_path = artifact_root / f"{page_slug}_ocr.jpg"
-            cv2_module = _get_cv2()
-            cv2_module.imwrite(str(page_bounding_path), ocr_vis)
-            if bounding_path is None:
-                bounding_path = page_bounding_path
+            if ocr_vis is not None:
+                page_bounding_path = artifact_root / f"{page_slug}_ocr.jpg"
+                cv2_module = _get_cv2()
+                cv2_module.imwrite(str(page_bounding_path), ocr_vis)
+                bounding_paths.append(page_bounding_path)
+                if bounding_path is None:
+                    bounding_path = page_bounding_path
+                if preview_image is None:
+                    preview_image = page_bounding_path
 
-        page_figures_dir = artifact_root / "figures" / page_slug
-        if page_figures_dir.exists():
-            crop_paths.extend(sorted(p for p in page_figures_dir.rglob("*") if p.is_file()))
+            page_figures_dir = artifact_root / "figures" / page_slug
+            if page_figures_dir.exists():
+                crop_paths.extend(sorted(p for p in page_figures_dir.rglob("*") if p.is_file()))
 
     combined_markdown = "\n\n".join(segment for segment in markdown_segments if segment).strip()
     combined_plain = "\n\n".join(segment for segment in plain_segments if segment).strip()
     if not combined_plain and combined_markdown:
         combined_plain = _markdown_to_plain_text(combined_markdown)
 
-    combined_text_path = text_root / f"{input_path.stem}.md"
+    combined_text_path = text_root / "combined.md"
     combined_text_path.write_text(combined_markdown, encoding="utf-8")
 
     if crop_paths and preview_image is None:
-        preview_image = crop_paths[0]
+        preview_image = crop_paths[-1]
     if preview_image is None:
         preview_image = bounding_path
 
@@ -778,10 +894,11 @@ def _run_yomitoku_variant(input_path: Path, work_dir: Path) -> OCRVariantArtifac
         artifact_dir=artifact_root,
         text_path=combined_text_path,
         bounding_image=bounding_path,
+        bounding_images=bounding_paths,
         crop_images=crop_paths,
         preview_text=preview_text,
         preview_image=preview_image,
-        extras={"pages": len(pages), "device": device},
+        extras={"pages": total_pages, "device": device},
     )
 
 
@@ -791,9 +908,17 @@ def _build_input_images(entry_id: str, entry_dir: Path) -> List[dict[str, str]]:
     if not input_dir.exists():
         return images
 
-    for path in sorted(input_dir.rglob("*")):
-        if not path.is_file():
-            continue
+    manifest_path = input_dir / "input_manifest.json"
+    manifest_entries: List[dict[str, str]] = []
+    if manifest_path.exists():
+        try:
+            manifest_entries = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:  # pragma: no cover - tolerate manual edits
+            manifest_entries = []
+
+    seen: set[Path] = set()
+
+    def append_image(path: Path, display_name: str) -> None:
         try:
             relative = path.relative_to(input_dir).as_posix()
         except ValueError:
@@ -801,11 +926,28 @@ def _build_input_images(entry_id: str, entry_dir: Path) -> List[dict[str, str]]:
         url_path = quote(relative, safe="/")
         images.append(
             {
-                "name": path.name,
+                "name": display_name,
                 "path": relative,
                 "url": f"/api/history/{entry_id}/image/input/{url_path}",
             }
         )
+
+    # Preserve manifest order when available
+    for entry in manifest_entries:
+        file_name = entry.get("file") if isinstance(entry, dict) else None
+        if not file_name:
+            continue
+        candidate = input_dir / file_name
+        if not candidate.is_file():
+            continue
+        seen.add(candidate)
+        display_name = entry.get("name") if isinstance(entry, dict) else None
+        append_image(candidate, display_name or candidate.name)
+
+    for path in sorted(input_dir.iterdir()):
+        if path == manifest_path or not path.is_file() or path in seen:
+            continue
+        append_image(path, path.name)
 
     return images
 
@@ -829,15 +971,70 @@ def run_ocr_bytes(
     if "/" in safe_name:
         safe_name = Path(safe_name).name
 
+    return run_ocr_uploads(
+        [(safe_name, image_bytes)],
+        models=models,
+        history_id=history_id,
+        model_name=model_name,
+        prompt=prompt,
+        base_size=base_size,
+        image_size=image_size,
+        crop_mode=crop_mode,
+        attn_impl=attn_impl,
+    )
+
+
+def run_ocr_uploads(
+    uploads: Sequence[tuple[str, bytes]],
+    *,
+    models: Optional[Sequence[str] | str] = None,
+    history_id: Optional[str] = None,
+    model_name: str = DEFAULT_MODEL_NAME,
+    prompt: str = "<image>\n<|grounding|>Convert the document to markdown.",
+    base_size: int = 1024,
+    image_size: int = 640,
+    crop_mode: bool = True,
+    attn_impl: str = "flash_attention_2",
+) -> dict[str, object]:
+    """Run OCR on one or more uploaded files and persist results."""
+
+    if not uploads:
+        raise ValueError("No uploads provided")
+
     selected_models = _normalize_model_selection(models)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_path = Path(tmpdir)
-        input_path = tmp_path / safe_name
-        input_path.write_bytes(image_bytes)
+        upload_dir = tmp_path / "uploads"
+        upload_dir.mkdir(parents=True, exist_ok=True)
+
+        saved_paths: List[Path] = []
+        original_names: List[str] = []
+        used_names: set[str] = set()
+
+        for index, (raw_name, content) in enumerate(uploads, start=1):
+            suffix = Path(raw_name or "").suffix or ".png"
+            fallback_name = f"upload_{index:03d}{suffix}"
+            safe_name = _unique_filename(raw_name or fallback_name, used_names, fallback_name)
+            target_path = upload_dir / safe_name
+            target_path.write_bytes(content)
+            saved_paths.append(target_path)
+            original_names.append(raw_name or safe_name)
+
+        processed_images = collect_image_paths(saved_paths, tmp_path)
+        if not processed_images:
+            raise RuntimeError("No image inputs detected")
+
+        snapshots = [InputSnapshot(name=path.name, path=path) for path in processed_images]
+        snapshot_names = [snapshot.name for snapshot in snapshots]
+
+        display_filename = original_names[0] if original_names else processed_images[0].name
+        if len(original_names) > 1:
+            display_filename = f"{display_filename} 他{len(original_names) - 1}件"
 
         variant_results: List[OCRVariantArtifacts] = []
         variant_errors: List[str] = []
+
         for key in selected_models:
             work_dir = tmp_path / f"{key}_work"
             descriptor = _descriptor_for(key)
@@ -845,7 +1042,7 @@ def run_ocr_bytes(
                 start_time = time.perf_counter()
                 if key == "deepseek":
                     variant = _run_deepseek_variant(
-                        input_path,
+                        processed_images,
                         work_dir,
                         model_name=model_name,
                         prompt=prompt,
@@ -856,7 +1053,7 @@ def run_ocr_bytes(
                     )
                 elif key == "deepseek-4bit":
                     variant = _run_quantized_deepseek_variant(
-                        input_path,
+                        processed_images,
                         work_dir,
                         prompt=prompt,
                         base_size=base_size,
@@ -865,12 +1062,13 @@ def run_ocr_bytes(
                         attn_impl=attn_impl,
                     )
                 elif key == "yomitoku":
-                    variant = _run_yomitoku_variant(input_path, work_dir)
+                    variant = _run_yomitoku_variant(processed_images, work_dir)
                 else:
                     raise ValueError(f"Unsupported OCR model '{key}'")
                 elapsed = time.perf_counter() - start_time
                 extras = variant.extras.copy() if variant.extras else {}
                 extras["elapsed_seconds"] = round(elapsed, 3)
+                extras["inputs"] = len(processed_images)
                 variant.extras = extras
                 variant_results.append(variant)
             except Exception as exc:  # noqa: BLE001
@@ -890,9 +1088,9 @@ def run_ocr_bytes(
                 metadata = _append_history_entry(
                     history_id,
                     variant_results,
-                    safe_name,
-                    image_bytes,
-                    input_path,
+                    display_filename,
+                    snapshots,
+                    original_filenames=snapshot_names,
                     warnings=variant_errors,
                 )
                 entry_id = metadata.get("id", history_id)
@@ -903,9 +1101,9 @@ def run_ocr_bytes(
         if metadata is None:
             metadata = _persist_history_entry(
                 variant_results,
-                safe_name,
-                image_bytes,
-                input_path,
+                display_filename,
+                snapshots,
+                input_filenames=snapshot_names,
                 warnings=variant_errors,
             )
             entry_id = metadata["id"]
@@ -917,10 +1115,10 @@ def run_ocr_bytes(
         variants_meta = metadata.get("variants")
         if isinstance(variants_meta, list) and variants_meta:
             for variant_meta in variants_meta:
-                variant_payloads.append(_build_variant_response(entry_id, metadata, variant_meta))
+                variant_payloads.append(_build_variant_response(entry_id, entry_dir, metadata, variant_meta))
         else:
             descriptor = _descriptor_for(metadata.get("primary_model"))
-            bounding_url, crops, preview_url = _build_image_urls(entry_id, metadata)
+            bounding_url, bounding_images, crops, preview_url = _build_image_urls(entry_id, entry_dir, metadata)
             variant_payloads.append(
                 {
                     "model": descriptor.key,
@@ -928,6 +1126,7 @@ def run_ocr_bytes(
                     "text_plain": metadata.get("text_plain", ""),
                     "text_markdown": metadata.get("text_markdown", ""),
                     "bounding_image_url": bounding_url,
+                    "bounding_images": bounding_images,
                     "crops": crops,
                     "preview_image_url": preview_url,
                     "preview": metadata.get("preview", ""),
@@ -937,32 +1136,36 @@ def run_ocr_bytes(
 
         primary_variant = variant_payloads[0]
 
+        response_metadata = {
+            "input": display_filename,
+            "input_files": snapshot_names,
+            "models": [variant.get("model") for variant in variant_payloads],
+            "warnings": variant_errors,
+        }
+
         return {
             "history_id": entry_id,
             "created_at": metadata.get("created_at"),
-            "filename": metadata.get("filename", safe_name),
+            "filename": metadata.get("filename", display_filename),
             "text_plain": primary_variant.get("text_plain", ""),
             "text_markdown": primary_variant.get("text_markdown", ""),
             "bounding_image_url": primary_variant.get("bounding_image_url"),
+            "bounding_images": primary_variant.get("bounding_images", []),
             "crops": primary_variant.get("crops", []),
             "preview_image_url": primary_variant.get("preview_image_url"),
             "preview": primary_variant.get("preview", metadata.get("preview", "")),
             "variants": variant_payloads,
             "input_images": input_images,
-            "metadata": {
-                "input": safe_name,
-                "models": [variant.get("model") for variant in variant_payloads],
-                "warnings": variant_errors,
-            },
+            "metadata": response_metadata,
         }
 
 
 def _persist_history_entry(
     variants: Sequence[OCRVariantArtifacts],
-    original_filename: str,
-    original_bytes: bytes,
-    source_path: Path,
+    display_filename: str,
+    snapshots: Sequence[InputSnapshot],
     *,
+    input_filenames: Optional[Sequence[str]] = None,
     warnings: Optional[Sequence[str]] = None,
 ) -> dict[str, object]:
     if not variants:
@@ -974,7 +1177,7 @@ def _persist_history_entry(
 
     variant_entries = [_store_variant_entry(entry_dir, variant) for variant in variants]
 
-    _ensure_input_snapshot(entry_dir, original_filename, original_bytes, source_path)
+    _ensure_input_snapshots(entry_dir, snapshots)
 
     warnings_list = None
     if warnings:
@@ -982,8 +1185,9 @@ def _persist_history_entry(
 
     metadata = _compose_history_metadata(
         entry_id,
-        original_filename,
+        display_filename,
         variant_entries,
+        input_files=[str(name) for name in input_filenames] if input_filenames else None,
         warnings=warnings_list,
     )
 
@@ -1012,11 +1216,83 @@ def select_variant(metadata: dict[str, object], model: Optional[str]) -> tuple[d
     return metadata, key
 
 
+def _collect_bounding_rel_paths(
+    entry_dir: Path,
+    variant_key: Optional[str],
+    variant_meta: dict[str, object],
+    metadata: dict[str, object],
+) -> List[str]:
+    existing: List[str] = []
+    raw = variant_meta.get("bounding_images")
+    if isinstance(raw, list):
+        existing.extend(str(item) for item in raw if item)
+
+    single = variant_meta.get("bounding_image")
+    if single:
+        existing.append(str(single))
+
+    if not existing and variant_meta is not metadata:
+        meta_level = metadata.get("bounding_images")
+        if isinstance(meta_level, list):
+            existing.extend(str(item) for item in meta_level if item)
+        single_meta = metadata.get("bounding_image")
+        if single_meta:
+            existing.append(str(single_meta))
+
+    normalized: List[str] = []
+    seen: set[str] = set()
+    for rel_str in existing:
+        if not rel_str:
+            continue
+        if rel_str in seen:
+            continue
+        seen.add(rel_str)
+        normalized.append(rel_str)
+
+    if normalized:
+        return normalized
+
+    if not variant_key:
+        return []
+
+    variant_root = entry_dir / variant_key
+    artifacts_root = variant_root / "artifacts"
+    if not artifacts_root.exists():
+        return []
+
+    candidates: List[str] = []
+    for path in sorted(p for p in artifacts_root.rglob("*") if p.is_file()):
+        suffix = path.suffix.lower()
+        if suffix not in {".jpg", ".jpeg", ".png", ".webp", ".bmp"}:
+            continue
+        name = path.name.lower()
+        if "ocr" not in name and "box" not in name and "bounding" not in name:
+            continue
+        rel = Path("artifacts") / path.relative_to(artifacts_root)
+        rel_str = rel.as_posix()
+        if rel_str in seen:
+            continue
+        seen.add(rel_str)
+        candidates.append(rel_str)
+
+    if not candidates:
+        for fallback in ("result_with_boxes.jpg", "result_with_boxes.png"):
+            candidate = artifacts_root / fallback
+            if candidate.exists():
+                rel_str = (Path("artifacts") / fallback).as_posix()
+                if rel_str not in seen:
+                    candidates.append(rel_str)
+                    seen.add(rel_str)
+
+    return candidates
+
+
 def _build_image_urls(
     entry_id: str,
+    entry_dir: Path,
     metadata: dict[str, object],
     model: Optional[str] = None,
-) -> tuple[Optional[str], List[dict[str, str]], Optional[str]]:
+) -> tuple[Optional[str], List[dict[str, str]], List[dict[str, str]], Optional[str]]:
     base_url = f"/api/history/{entry_id}"
     variant_meta, variant_key = select_variant(metadata, model)
 
@@ -1025,6 +1301,28 @@ def _build_image_urls(
     bounding_rel_str = str(bounding_rel) if bounding_rel else None
     if bounding_rel_str:
         bounding_url = _append_model_query(f"{base_url}/image/bounding", variant_key)
+
+    raw_bounding_paths = _collect_bounding_rel_paths(entry_dir, variant_key, variant_meta, metadata)
+    if not raw_bounding_paths and bounding_rel_str:
+        raw_bounding_paths = [bounding_rel_str]
+
+    bounding_path_set = {rel for rel in raw_bounding_paths}
+    bounding_name_set = {Path(rel).name for rel in raw_bounding_paths}
+
+    bounding_images: List[dict[str, str]] = []
+    for rel_str in raw_bounding_paths:
+        url = f"{base_url}/image/bounding/{quote(rel_str, safe='/')}"
+        url = _append_model_query(url, variant_key)
+        bounding_images.append(
+            {
+                "name": Path(rel_str).name,
+                "path": rel_str,
+                "url": url,
+            }
+        )
+
+    if bounding_url is None and bounding_images:
+        bounding_url = bounding_images[0]["url"]
 
     raw_crop_paths = [str(rel_path) for rel_path in variant_meta.get("crops", [])]
     crop_path_set = set(raw_crop_paths)
@@ -1049,6 +1347,11 @@ def _build_image_urls(
         preview_name = Path(preview_str).name
         if bounding_rel_str and Path(preview_str) == Path(bounding_rel_str):
             preview_url = bounding_url
+        elif preview_str in bounding_path_set or preview_name in bounding_name_set:
+            preview_url = next(
+                (item["url"] for item in bounding_images if item["path"] == preview_str or Path(item["path"]).name == preview_name),
+                None,
+            )
         elif preview_str in crop_path_set or preview_name in crop_name_set:
             preview_url = f"{base_url}/image/crop/{quote(preview_str, safe='/')}"
             preview_url = _append_model_query(preview_url, variant_key)
@@ -1056,27 +1359,35 @@ def _build_image_urls(
             preview_url = bounding_url
 
     if preview_url is None:
-        preview_url = bounding_url or (crops[0]["url"] if crops else None)
+        preview_url = bounding_url or (bounding_images[0]["url"] if bounding_images else None) or (crops[0]["url"] if crops else None)
 
-    return bounding_url, crops, preview_url
+    return bounding_url, bounding_images, crops, preview_url
 
 
-def _build_variant_response(entry_id: str, metadata: dict[str, object], variant_meta: dict[str, object]) -> dict[str, object]:
+def _build_variant_response(
+    entry_id: str,
+    entry_dir: Path,
+    metadata: dict[str, object],
+    variant_meta: dict[str, object],
+) -> dict[str, object]:
     variant_key = variant_meta.get("model")
     descriptor = _descriptor_for(variant_key)
-    bounding_url, crops, preview_url = _build_image_urls(entry_id, metadata, variant_key)
+    bounding_url, bounding_images, crops, preview_url = _build_image_urls(entry_id, entry_dir, metadata, variant_key)
     extras = variant_meta.get("extras") or {}
     variant_metadata = {
         "text_path": variant_meta.get("text_path"),
         "bounding_image_path": variant_meta.get("bounding_image"),
         **extras,
     }
+    if bounding_images:
+        variant_metadata.setdefault("bounding_images", [item["path"] for item in bounding_images])
     return {
         "model": descriptor.key,
         "label": variant_meta.get("label", descriptor.label),
         "text_plain": variant_meta.get("text_plain", ""),
         "text_markdown": variant_meta.get("text_markdown", ""),
         "bounding_image_url": bounding_url,
+        "bounding_images": bounding_images,
         "crops": crops,
         "preview_image_url": preview_url,
         "preview": variant_meta.get("preview", ""),
@@ -1110,12 +1421,25 @@ def _store_variant_entry(entry_dir: Path, variant: OCRVariantArtifacts) -> dict[
     shutil.copytree(variant.text_path.parent, texts_target)
 
     bounding_rel = None
+    bounding_rel_paths: List[str] = []
     if variant.bounding_image:
         try:
             rel = Path("artifacts") / variant.bounding_image.relative_to(variant.artifact_dir)
         except ValueError:
             rel = Path("artifacts") / variant.bounding_image.name
         bounding_rel = rel.as_posix()
+
+    for bounding_path in variant.bounding_images:
+        try:
+            rel = Path("artifacts") / bounding_path.relative_to(variant.artifact_dir)
+        except ValueError:
+            rel = Path("artifacts") / bounding_path.name
+        rel_str = rel.as_posix()
+        if rel_str not in bounding_rel_paths:
+            bounding_rel_paths.append(rel_str)
+
+    if bounding_rel is None and bounding_rel_paths:
+        bounding_rel = bounding_rel_paths[0]
 
     crop_rel_paths: List[str] = []
     for crop_path in variant.crop_images:
@@ -1141,6 +1465,7 @@ def _store_variant_entry(entry_dir: Path, variant: OCRVariantArtifacts) -> dict[
         "text_plain": variant.text_plain,
         "text_markdown": variant.text_markdown,
         "bounding_image": bounding_rel,
+        "bounding_images": bounding_rel_paths,
         "crops": crop_rel_paths,
         "preview": variant.preview_text,
         "preview_image": preview_rel,
@@ -1155,6 +1480,7 @@ def _compose_history_metadata(
     variant_entries: List[dict[str, object]],
     *,
     created_at: Optional[str] = None,
+    input_files: Optional[Iterable[str]] = None,
     warnings: Optional[Iterable[str]] = None,
 ) -> dict[str, object]:
     if not variant_entries:
@@ -1175,8 +1501,12 @@ def _compose_history_metadata(
         "text_plain": primary.get("text_plain", ""),
         "text_markdown": primary.get("text_markdown", ""),
         "bounding_image": primary.get("bounding_image"),
+        "bounding_images": primary.get("bounding_images", []),
         "crops": primary.get("crops", []),
     }
+
+    if input_files:
+        metadata["input_files"] = [str(item) for item in input_files if item]
 
     if warnings:
         warning_set = {warning for warning in warnings if warning}
@@ -1186,31 +1516,54 @@ def _compose_history_metadata(
     return metadata
 
 
-def _ensure_input_snapshot(
+def _ensure_input_snapshots(
     entry_dir: Path,
-    original_filename: str,
-    original_bytes: bytes,
-    source_path: Path,
+    snapshots: Sequence[InputSnapshot],
 ) -> None:
+    if not snapshots:
+        return
+
     input_target_dir = entry_dir / "input"
-    if input_target_dir.exists() and any(input_target_dir.iterdir()):
+    existing_files: set[str] = set()
+    if input_target_dir.exists():
+        for candidate in input_target_dir.iterdir():
+            if candidate.is_file() and candidate.name != "input_manifest.json":
+                existing_files.add(candidate.name.lower())
+    if existing_files:
+        # Preserve the first captured inputs to retain original history context.
         return
 
     input_target_dir.mkdir(parents=True, exist_ok=True)
-    target_path = input_target_dir / original_filename
-    if source_path.exists():
-        shutil.copy(source_path, target_path)
-    else:
-        target_path.write_bytes(original_bytes)
+    manifest: List[dict[str, str]] = []
+    used: set[str] = set(existing_files)
+
+    for index, snapshot in enumerate(snapshots, start=1):
+        if not snapshot.path.exists():
+            continue
+        fallback = f"input_{index:03d}{snapshot.path.suffix or '.png'}"
+        stored_name = _unique_filename(snapshot.path.name or fallback, used, fallback)
+        target_path = input_target_dir / stored_name
+        shutil.copy(snapshot.path, target_path)
+        manifest.append({
+            "file": stored_name,
+            "name": snapshot.name or stored_name,
+        })
+
+    if manifest:
+        manifest_path = input_target_dir / "input_manifest.json"
+        manifest_path.write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
 
 def _append_history_entry(
     entry_id: str,
     variants: Sequence[OCRVariantArtifacts],
-    original_filename: str,
-    original_bytes: bytes,
-    source_path: Path,
+    display_filename: str,
+    snapshots: Sequence[InputSnapshot],
     *,
+    original_filenames: Optional[Sequence[str]] = None,
     warnings: Optional[Sequence[str]] = None,
 ) -> dict[str, object]:
     metadata, entry_dir = _load_entry_metadata(entry_id)
@@ -1230,13 +1583,21 @@ def _append_history_entry(
     if warnings:
         combined_warnings.extend(str(item) for item in warnings if item)
 
-    _ensure_input_snapshot(entry_dir, original_filename, original_bytes, source_path)
+    _ensure_input_snapshots(entry_dir, snapshots)
+
+    input_files: List[str] = []
+    existing_inputs = metadata.get("input_files")
+    if isinstance(existing_inputs, list):
+        input_files.extend(str(item) for item in existing_inputs if item)
+    if not input_files and original_filenames:
+        input_files.extend(str(name) for name in original_filenames if name)
 
     updated_metadata = _compose_history_metadata(
         entry_id,
-        metadata.get("filename", original_filename),
+        metadata.get("filename", display_filename),
         combined_entries,
         created_at=metadata.get("created_at"),
+        input_files=input_files or None,
         warnings=combined_warnings,
     )
 
@@ -1276,7 +1637,7 @@ def list_history_entries(limit: int | None = None) -> List[dict[str, object]]:
             continue
 
         entry_id = metadata.get("id", entry_dir.name)
-        _, _, preview_url = _build_image_urls(entry_id, metadata)
+        _, _, _, preview_url = _build_image_urls(entry_id, entry_dir, metadata)
 
         models = metadata.get("models")
         if not models and isinstance(metadata.get("variants"), list):
@@ -1308,10 +1669,10 @@ def load_history_entry(entry_id: str) -> dict[str, object]:
     variants_meta = metadata.get("variants")
     if isinstance(variants_meta, list) and variants_meta:
         for variant_meta in variants_meta:
-            variants_payload.append(_build_variant_response(entry_id, metadata, variant_meta))
+            variants_payload.append(_build_variant_response(entry_id, entry_dir, metadata, variant_meta))
     else:
         descriptor = _descriptor_for(metadata.get("primary_model"))
-        bounding_url, crops, preview_url = _build_image_urls(entry_id, metadata)
+        bounding_url, bounding_images, crops, preview_url = _build_image_urls(entry_id, entry_dir, metadata)
         variants_payload.append(
             {
                 "model": descriptor.key,
@@ -1319,6 +1680,7 @@ def load_history_entry(entry_id: str) -> dict[str, object]:
                 "text_plain": metadata.get("text_plain", ""),
                 "text_markdown": metadata.get("text_markdown", ""),
                 "bounding_image_url": bounding_url,
+                "bounding_images": bounding_images,
                 "crops": crops,
                 "preview_image_url": preview_url,
                 "preview": metadata.get("preview", ""),
@@ -1335,6 +1697,7 @@ def load_history_entry(entry_id: str) -> dict[str, object]:
         "text_plain": primary_variant.get("text_plain", ""),
         "text_markdown": primary_variant.get("text_markdown", ""),
         "bounding_image_url": primary_variant.get("bounding_image_url"),
+        "bounding_images": primary_variant.get("bounding_images", []),
         "crops": primary_variant.get("crops", []),
         "preview_image_url": primary_variant.get("preview_image_url"),
         "preview": primary_variant.get("preview", metadata.get("preview", "")),

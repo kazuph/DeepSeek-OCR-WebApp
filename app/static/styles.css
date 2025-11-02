@@ -389,12 +389,57 @@ h1 {
   display: none;
 }
 
-.bounding-card .variant-card-content {
-  align-items: center;
-}
-
 .bounding-card .bounding-image {
   max-height: 480px;
+}
+
+.bounding-carousel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.bounding-frame {
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, 0.25);
+  padding: 8px;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  cursor: zoom-in;
+}
+
+.bounding-frame .bounding-image {
+  width: 100%;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(0, 0, 0, 0.25);
+}
+
+.bounding-nav {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.bounding-indicator {
+  flex: 1 1 auto;
+  text-align: center;
+  font-size: 12px;
+  opacity: 0.75;
+}
+
+.bounding-actions {
+  justify-content: flex-end;
+}
+
+.bounding-actions .icon-button {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.nav-button {
+  min-width: 88px;
 }
 
 .queue-list {
@@ -466,20 +511,15 @@ h1 {
 
 .preview-grid {
   display: grid;
-  grid-auto-flow: column;
-  grid-auto-columns: 140px;
-  grid-template-rows: repeat(2, 134px);
-  gap: 10px;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 12px;
   align-items: start;
-  max-height: 278px;
-  overflow-x: auto;
-  padding-bottom: 4px;
 }
 
 .preview-item {
   position: relative;
-  width: 130px;
-  height: 134px;
+  width: 100%;
+  height: auto;
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -487,7 +527,8 @@ h1 {
 
 .preview-thumb {
   width: 100%;
-  height: 100px;
+  min-height: 100px;
+  max-height: 160px;
   object-fit: cover;
   border-radius: 10px;
   border: 1px solid rgba(255, 255, 255, 0.1);

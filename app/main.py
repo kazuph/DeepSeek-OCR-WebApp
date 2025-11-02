@@ -14,7 +14,7 @@ from app.ocr_engine import (
     delete_history_entry,
     list_history_entries,
     load_history_entry,
-    run_ocr_bytes,
+    run_ocr_uploads,
     select_variant,
     _load_entry_metadata,
 )
@@ -85,14 +85,28 @@ async def models_list() -> List[dict[str, str]]:
 
 @app.post("/api/ocr")
 async def ocr_endpoint(
-    file: UploadFile = File(...),
+    files: List[UploadFile] = File(default=None),
+    file: UploadFile | None = File(default=None),
     prompt: str | None = Form(default=None),
     models: str | None = Form(default=None),
     history_id: str | None = Form(default=None),
 ) -> dict[str, object]:
-    content = await file.read()
-    if not content:
-        raise HTTPException(status_code=400, detail="Empty upload")
+    uploads: List[UploadFile] = []
+    if files:
+        uploads.extend(files)
+    if file is not None:
+        uploads.append(file)
+
+    if not uploads:
+        raise HTTPException(status_code=400, detail="No files uploaded")
+
+    payloads: List[tuple[str, bytes]] = []
+    for item in uploads:
+        content = await item.read()
+        if not content:
+            raise HTTPException(status_code=400, detail="Empty upload detected")
+        filename = item.filename or "upload.png"
+        payloads.append((filename, content))
 
     try:
         prompt_value = (prompt or "").strip() or None
@@ -104,7 +118,7 @@ async def ocr_endpoint(
             kwargs["models"] = models_value
         if history_id:
             kwargs["history_id"] = history_id
-        result = run_ocr_bytes(content, file.filename or "upload.png", **kwargs)
+        result = run_ocr_uploads(payloads, **kwargs)
     except Exception as exc:  # noqa: BLE001 - surface to client
         raise HTTPException(status_code=500, detail=f"OCR failed: {exc}") from exc
 
@@ -143,9 +157,51 @@ async def history_bounding_image(entry_id: str, model: str | None = Query(defaul
     variant_meta, variant_key = select_variant(metadata, model)
     bounding_name = variant_meta.get("bounding_image")
     if not bounding_name:
+        bounding_list = variant_meta.get("bounding_images")
+        if not bounding_list and variant_meta is not metadata:
+            bounding_list = metadata.get("bounding_images")
+        if isinstance(bounding_list, list) and bounding_list:
+            bounding_name = str(bounding_list[0])
+    if not bounding_name:
         raise HTTPException(status_code=404, detail="Bounding image not found")
 
     path = _resolve_history_file(entry_dir, bounding_name, variant_key)
+    return FileResponse(path)
+
+
+@app.get("/api/history/{entry_id}/image/bounding/{file_path:path}")
+async def history_bounding_image_multi(entry_id: str, file_path: str, model: str | None = Query(default=None)) -> FileResponse:
+    try:
+        metadata, entry_dir = _load_entry_metadata(entry_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="History entry not found") from exc
+
+    variant_meta, variant_key = select_variant(metadata, model)
+
+    allowed_raw = variant_meta.get("bounding_images")
+    if not allowed_raw and variant_meta is not metadata:
+        allowed_raw = metadata.get("bounding_images")
+
+    allowed: set[str] = set()
+    if isinstance(allowed_raw, list):
+        allowed |= {str(item) for item in allowed_raw if item}
+
+    single = variant_meta.get("bounding_image")
+    if single:
+        allowed.add(str(single))
+
+    if not allowed:
+        raise HTTPException(status_code=404, detail="Bounding image not found")
+
+    names = {Path(item).name for item in allowed}
+    candidate = file_path
+    if candidate not in allowed and Path(candidate).name in names:
+        candidate = Path(candidate).name
+
+    if candidate not in allowed:
+        raise HTTPException(status_code=404, detail="Bounding image not found")
+
+    path = _resolve_history_file(entry_dir, candidate, variant_key)
     return FileResponse(path)
 
 
