@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import List, Optional
 
@@ -72,12 +73,21 @@ async def ping() -> dict[str, str]:
 
 
 @app.get("/api/models")
-async def models_list() -> List[dict[str, str]]:
+async def models_list() -> List[dict[str, object]]:
     return [
         {
             "key": descriptor.key,
             "label": descriptor.label,
             "description": descriptor.description,
+            "options": [
+                {
+                    "key": option.key,
+                    "label": option.label,
+                    "description": option.description,
+                    "default": option.default,
+                }
+                for option in descriptor.options
+            ],
         }
         for descriptor in MODEL_DESCRIPTORS
     ]
@@ -90,6 +100,7 @@ async def ocr_endpoint(
     prompt: str | None = Form(default=None),
     models: str | None = Form(default=None),
     history_id: str | None = Form(default=None),
+    model_options: str | None = Form(default=None),
 ) -> dict[str, object]:
     uploads: List[UploadFile] = []
     if files:
@@ -118,6 +129,14 @@ async def ocr_endpoint(
             kwargs["models"] = models_value
         if history_id:
             kwargs["history_id"] = history_id
+        if model_options:
+            try:
+                parsed_options = json.loads(model_options)
+            except json.JSONDecodeError as exc:  # pragma: no cover - client input
+                raise HTTPException(status_code=400, detail="Invalid model_options payload") from exc
+            if not isinstance(parsed_options, dict):
+                raise HTTPException(status_code=400, detail="model_options must be an object")
+            kwargs["model_options"] = parsed_options
         result = run_ocr_uploads(payloads, **kwargs)
     except Exception as exc:  # noqa: BLE001 - surface to client
         raise HTTPException(status_code=500, detail=f"OCR failed: {exc}") from exc

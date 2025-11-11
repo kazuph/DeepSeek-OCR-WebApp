@@ -42,6 +42,9 @@ const MODEL_STATUS_CLASSES = {
   error: 'error',
 };
 
+const MODEL_SELECTION_STORAGE_KEY = 'ocr.selectedModels';
+const MODEL_OPTIONS_STORAGE_KEY = 'ocr.modelOptions';
+
 const modelTimerHandles = new Map();
 
 function buildPlaceholderDataUrl(label) {
@@ -217,6 +220,7 @@ let progressSession = 0;
 let activeProgressSession = 0;
 let availableModels = [];
 let selectedModels = new Set();
+const modelOptionSelections = new Map();
 let serverStatusText = 'モデル初期化待機中…';
 let modelStatusMap = new Map();
 let activeAggregate = null;
@@ -293,10 +297,111 @@ function updateModelInfo(statusText = null) {
 function persistModelSelection() {
   try {
     const stored = JSON.stringify([...selectedModels]);
-    localStorage.setItem('ocr.selectedModels', stored);
+    localStorage.setItem(MODEL_SELECTION_STORAGE_KEY, stored);
   } catch (error) {
     console.debug('モデル選択の保存に失敗しました', error);
   }
+}
+
+function persistModelOptions() {
+  try {
+    const serialized = {};
+    modelOptionSelections.forEach((options, modelKey) => {
+      if (!modelKey || !options || typeof options !== 'object') {
+        return;
+      }
+      serialized[modelKey] = { ...options };
+    });
+    localStorage.setItem(MODEL_OPTIONS_STORAGE_KEY, JSON.stringify(serialized));
+  } catch (error) {
+    console.debug('モデルオプションの保存に失敗しました', error);
+  }
+}
+
+function loadStoredModelOptions() {
+  try {
+    const stored = localStorage.getItem(MODEL_OPTIONS_STORAGE_KEY);
+    if (!stored) {
+      return;
+    }
+    const parsed = JSON.parse(stored);
+    if (!parsed || typeof parsed !== 'object') {
+      return;
+    }
+    Object.entries(parsed).forEach(([modelKey, options]) => {
+      if (!modelKey || !options || typeof options !== 'object') {
+        return;
+      }
+      modelOptionSelections.set(modelKey, { ...options });
+    });
+  } catch (error) {
+    console.debug('モデルオプションの読み込みに失敗しました', error);
+  }
+}
+
+function ensureModelOptionDefaults() {
+  const validModelKeys = new Set(availableModels.map((model) => model.key));
+  [...modelOptionSelections.keys()].forEach((key) => {
+    if (!validModelKeys.has(key)) {
+      modelOptionSelections.delete(key);
+    }
+  });
+
+  availableModels.forEach((model) => {
+    if (!model || !model.key) {
+      return;
+    }
+    const current = { ...(modelOptionSelections.get(model.key) || {}) };
+    if (!Array.isArray(model.options) || !model.options.length) {
+      modelOptionSelections.set(model.key, current);
+      return;
+    }
+    model.options.forEach((option) => {
+      if (!option || !option.key) {
+        return;
+      }
+      if (typeof current[option.key] !== 'boolean') {
+        current[option.key] = !!option.default;
+      }
+    });
+    modelOptionSelections.set(model.key, current);
+  });
+
+  persistModelOptions();
+}
+
+function getModelOptionValue(modelKey, optionKey) {
+  const options = modelOptionSelections.get(modelKey);
+  if (!options || typeof options !== 'object') {
+    return false;
+  }
+  return !!options[optionKey];
+}
+
+function setModelOptionValue(modelKey, optionKey, value) {
+  const options = { ...(modelOptionSelections.get(modelKey) || {}) };
+  options[optionKey] = !!value;
+  modelOptionSelections.set(modelKey, options);
+  persistModelOptions();
+}
+
+function buildModelOptionPayload(modelKey) {
+  const options = modelOptionSelections.get(modelKey);
+  if (!options || typeof options !== 'object') {
+    return null;
+  }
+  const normalized = {};
+  let hasValue = false;
+  Object.entries(options).forEach(([key, value]) => {
+    if (typeof value === 'boolean') {
+      normalized[key] = value;
+      hasValue = true;
+    }
+  });
+  if (!hasValue) {
+    return null;
+  }
+  return { [modelKey]: normalized };
 }
 
 function renderModelOptions() {
@@ -318,8 +423,11 @@ function renderModelOptions() {
   }
 
   availableModels.forEach((model) => {
-    const option = document.createElement('label');
+    const option = document.createElement('div');
     option.className = 'model-option';
+
+    const mainRow = document.createElement('label');
+    mainRow.className = 'model-option-main';
 
     const checkbox = document.createElement('input');
     checkbox.type = 'checkbox';
@@ -331,25 +439,29 @@ function renderModelOptions() {
       } else if (selectedModels.size > 1) {
         selectedModels.delete(model.key);
       } else {
-        // 1つは必ず選択済みにする
         checkbox.checked = true;
       }
       updateModelInfo();
       persistModelSelection();
     });
 
+    const labelContainer = document.createElement('div');
+    labelContainer.className = 'model-option-text';
+
     const label = document.createElement('span');
     label.className = 'model-option-label';
     label.textContent = model.label;
-
-    option.append(checkbox, label);
+    labelContainer.appendChild(label);
 
     if (model.description) {
       const description = document.createElement('span');
       description.className = 'model-option-description';
       description.textContent = model.description;
-      option.appendChild(description);
+      labelContainer.appendChild(description);
     }
+
+    mainRow.append(checkbox, labelContainer);
+    option.appendChild(mainRow);
 
     const info = modelStatusMap.get(model.key);
     const statusKey = info?.status;
@@ -362,6 +474,45 @@ function renderModelOptions() {
       const labelText = formatStatusLabel(info) || MODEL_STATUS_LABELS[statusKey] || statusKey;
       statusBadge.textContent = labelText;
       option.appendChild(statusBadge);
+    }
+
+    if (Array.isArray(model.options) && model.options.length) {
+      const settings = document.createElement('div');
+      settings.className = 'model-option-settings';
+      model.options.forEach((opt) => {
+        if (!opt || !opt.key) {
+          return;
+        }
+        const optLabel = document.createElement('label');
+        optLabel.className = 'model-suboption';
+
+        const optCheckbox = document.createElement('input');
+        optCheckbox.type = 'checkbox';
+        optCheckbox.value = opt.key;
+        optCheckbox.checked = getModelOptionValue(model.key, opt.key);
+        optCheckbox.addEventListener('change', () => {
+          setModelOptionValue(model.key, opt.key, optCheckbox.checked);
+        });
+
+        const optBody = document.createElement('div');
+        optBody.className = 'model-suboption-body';
+
+        const optLabelText = document.createElement('span');
+        optLabelText.className = 'model-suboption-label';
+        optLabelText.textContent = opt.label;
+        optBody.appendChild(optLabelText);
+
+        if (opt.description) {
+          const optDesc = document.createElement('span');
+          optDesc.className = 'model-suboption-description';
+          optDesc.textContent = opt.description;
+          optBody.appendChild(optDesc);
+        }
+
+        optLabel.append(optCheckbox, optBody);
+        settings.appendChild(optLabel);
+      });
+      option.appendChild(settings);
     }
 
     fragment.appendChild(option);
@@ -430,7 +581,7 @@ function clearModelStatuses() {
 
 function loadStoredModelSelection() {
   try {
-    const stored = localStorage.getItem('ocr.selectedModels');
+    const stored = localStorage.getItem(MODEL_SELECTION_STORAGE_KEY);
     if (stored) {
       const parsed = JSON.parse(stored);
       if (Array.isArray(parsed) && parsed.length) {
@@ -470,9 +621,25 @@ async function fetchModels() {
   } catch (error) {
     console.warn('モデルリストの取得に失敗しました。既定値を使用します。', error);
     models = [
-      { key: 'yomitoku', label: 'YomiToku Document Analyzer', description: '' },
-      { key: 'deepseek', label: 'DeepSeek OCR', description: '' },
-      { key: 'deepseek-4bit', label: 'DeepSeek OCR (4-bit Quantized)', description: 'BitsAndBytes 4-bit build (CUDA GPU required).' },
+      {
+        key: 'yomitoku',
+        label: 'YomiToku Document Analyzer',
+        description: '',
+        options: [
+          {
+            key: 'figure_letter',
+            label: '絵や図の中の文字も抽出',
+            description: 'YomiToku の --figure_letter オプション相当。',
+          },
+        ],
+      },
+      { key: 'deepseek', label: 'DeepSeek OCR', description: '', options: [] },
+      {
+        key: 'deepseek-4bit',
+        label: 'DeepSeek OCR (4-bit Quantized)',
+        description: 'BitsAndBytes 4-bit build (CUDA GPU required).',
+        options: [],
+      },
     ];
   }
 
@@ -487,6 +654,7 @@ async function fetchModels() {
 
   availableModels = models;
   ensureModelSelection();
+  ensureModelOptionDefaults();
   updateModelInfo('モデル一覧取得済み');
   renderModelOptions();
   persistModelSelection();
@@ -2322,6 +2490,11 @@ async function uploadModelVariant(item, modelKey, promptValue) {
     formData.append('history_id', item.historyId);
   }
 
+  const optionPayload = buildModelOptionPayload(modelKey);
+  if (optionPayload) {
+    formData.append('model_options', JSON.stringify(optionPayload));
+  }
+
   setModelStatus(modelKey, 'running');
   setStatus(`${label} を解析中…`);
 
@@ -2528,6 +2701,7 @@ async function deleteHistoryEntry(id, filename) {
 }
 
 loadStoredModelSelection();
+loadStoredModelOptions();
 updateModelInfo();
 fetchModels();
 clearResults();

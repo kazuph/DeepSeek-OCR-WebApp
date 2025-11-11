@@ -232,15 +232,13 @@ h1 {
 }
 
 .model-option {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 6px 10px;
-  align-items: center;
-  padding: 10px 12px;
-  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 16px;
+  border-radius: 12px;
   border: 1px solid rgba(255, 255, 255, 0.12);
   background: rgba(255, 255, 255, 0.05);
-  cursor: pointer;
   transition: border-color 0.2s ease, background 0.2s ease;
   min-width: 220px;
   max-width: 340px;
@@ -252,10 +250,24 @@ h1 {
   background: rgba(255, 152, 0, 0.12);
 }
 
-.model-option input[type="checkbox"] {
+.model-option-main {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 10px;
+  align-items: flex-start;
+  cursor: pointer;
+}
+
+.model-option-main input[type="checkbox"] {
   width: 18px;
   height: 18px;
-  margin: 0;
+  margin: 2px 0 0;
+}
+
+.model-option-text {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
 .model-option-label {
@@ -264,14 +276,52 @@ h1 {
 }
 
 .model-option-description {
-  grid-column: 1 / -1;
   font-size: 12px;
   opacity: 0.7;
   line-height: 1.5;
 }
 
+.model-option-settings {
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  padding-top: 8px;
+  margin-top: 2px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.model-suboption {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 8px;
+  align-items: flex-start;
+  cursor: pointer;
+}
+
+.model-suboption input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin: 2px 0 0;
+}
+
+.model-suboption-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.model-suboption-label {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.model-suboption-description {
+  font-size: 12px;
+  opacity: 0.75;
+  line-height: 1.4;
+}
+
 .model-option-status {
-  grid-column: 1 / -1;
   font-size: 12px;
   font-weight: 600;
   border-radius: 999px;
@@ -281,6 +331,7 @@ h1 {
   gap: 4px;
   margin-top: 4px;
   width: fit-content;
+  align-self: flex-start;
 }
 
 .model-status-pending {

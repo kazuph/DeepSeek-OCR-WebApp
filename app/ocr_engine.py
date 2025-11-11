@@ -16,7 +16,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 from urllib.parse import quote
 
 import importlib
@@ -92,10 +92,19 @@ class OCRDocumentResult:
 
 
 @dataclass(frozen=True)
+class ModelOptionDescriptor:
+    key: str
+    label: str
+    description: str = ""
+    default: bool = False
+
+
+@dataclass(frozen=True)
 class ModelDescriptor:
     key: str
     label: str
     description: str = ""
+    options: tuple[ModelOptionDescriptor, ...] = tuple()
 
 
 @dataclass
@@ -127,7 +136,17 @@ WEB_HISTORY_DIR.mkdir(parents=True, exist_ok=True)
 
 
 MODEL_DESCRIPTORS: List[ModelDescriptor] = [
-    ModelDescriptor(key="yomitoku", label="YomiToku Document Analyzer"),
+    ModelDescriptor(
+        key="yomitoku",
+        label="YomiToku Document Analyzer",
+        options=(
+            ModelOptionDescriptor(
+                key="figure_letter",
+                label="絵や図の中の文字も抽出",
+                description="YomiToku の --figure_letter 相当。ページ全体を図として検出してしまう絵本・縦書き原稿向け。",
+            ),
+        ),
+    ),
     ModelDescriptor(key="deepseek", label="DeepSeek OCR"),
 #    ModelDescriptor(
 #        key="deepseek-8bit",
@@ -601,6 +620,101 @@ def _yomitoku_plain_from_results(results) -> str:
     return "\n".join(lines).strip()
 
 
+def _word_centroid(points) -> tuple[float, float]:
+    xs: List[float] = []
+    ys: List[float] = []
+    if isinstance(points, (list, tuple)):
+        for entry in points:
+            if not isinstance(entry, (list, tuple)) or len(entry) < 2:
+                continue
+            x, y = entry[0], entry[1]
+            if isinstance(x, (int, float)) and isinstance(y, (int, float)):
+                xs.append(float(x))
+                ys.append(float(y))
+    if xs and ys:
+        return sum(xs) / len(xs), sum(ys) / len(ys)
+    return 0.0, 0.0
+
+
+def _yomitoku_words_fallback(results) -> str:
+    words = getattr(results, "words", None)
+    if not words:
+        return ""
+
+    entries: List[dict[str, object]] = []
+    for word in words:
+        if isinstance(word, dict):
+            content = word.get("content")
+            points = word.get("points")
+            direction = word.get("direction")
+        else:
+            content = getattr(word, "content", None)
+            points = getattr(word, "points", None)
+            direction = getattr(word, "direction", None)
+        text = (content or "").strip()
+        if not text:
+            continue
+        cx, cy = _word_centroid(points)
+        entries.append(
+            {
+                "direction": (direction or "horizontal"),
+                "x": cx,
+                "y": cy,
+                "text": text,
+            }
+        )
+
+    if not entries:
+        return ""
+
+    bucket = 40.0
+    lines: List[str] = []
+
+    horizontals = [entry for entry in entries if entry["direction"] != "vertical"]
+    horizontals.sort(key=lambda item: (round(item["y"] / bucket) if bucket else 0, item["x"]))
+    current_bucket = None
+    buffer: List[str] = []
+    for entry in horizontals:
+        bucket_index = round(entry["y"] / bucket) if bucket else 0
+        if current_bucket is None:
+            current_bucket = bucket_index
+        if bucket_index != current_bucket and buffer:
+            line = "".join(buffer).strip()
+            if line:
+                lines.append(line)
+            buffer = [entry["text"]]  # type: ignore[index]
+            current_bucket = bucket_index
+        else:
+            buffer.append(entry["text"])  # type: ignore[index]
+    if buffer:
+        line = "".join(buffer).strip()
+        if line:
+            lines.append(line)
+
+    verticals = [entry for entry in entries if entry["direction"] == "vertical"]
+    verticals.sort(key=lambda item: (-round(item["x"] / bucket) if bucket else 0, item["y"]))
+    current_bucket = None
+    buffer = []
+    for entry in verticals:
+        bucket_index = round(entry["x"] / bucket) if bucket else 0
+        if current_bucket is None:
+            current_bucket = bucket_index
+        if bucket_index != current_bucket and buffer:
+            line = "\n".join(buffer).strip()
+            if line:
+                lines.append(line)
+            buffer = [entry["text"]]  # type: ignore[index]
+            current_bucket = bucket_index
+        else:
+            buffer.append(entry["text"])  # type: ignore[index]
+    if buffer:
+        line = "\n".join(buffer).strip()
+        if line:
+            lines.append(line)
+
+    return "\n\n".join(line for line in lines if line).strip()
+
+
 def _run_deepseek_variant(
     input_paths: Sequence[Path],
     work_dir: Path,
@@ -809,7 +923,12 @@ def _rewrite_yomitoku_markdown_links(markdown: str, figures_dir: Path) -> str:
     return updated
 
 
-def _run_yomitoku_variant(input_paths: Sequence[Path], work_dir: Path) -> OCRVariantArtifacts:
+def _run_yomitoku_variant(
+    input_paths: Sequence[Path],
+    work_dir: Path,
+    *,
+    export_figure_letter: bool = False,
+) -> OCRVariantArtifacts:
     _require_cv2()
     device = _get_device()
     analyzer = _get_yomitoku_analyzer(device)
@@ -827,6 +946,7 @@ def _run_yomitoku_variant(input_paths: Sequence[Path], work_dir: Path) -> OCRVar
     bounding_path: Optional[Path] = None
     bounding_paths: List[Path] = []
     preview_image: Optional[Path] = None
+    used_word_fallback = False
 
     executor = _get_yomitoku_executor()
     total_pages = 0
@@ -845,15 +965,29 @@ def _run_yomitoku_variant(input_paths: Sequence[Path], work_dir: Path) -> OCRVar
                 str(page_text_path),
                 img=image,
                 figure_dir=str(figures_dir),
+                export_figure_letter=export_figure_letter,
             )
             markdown_text = _rewrite_yomitoku_markdown_links(markdown_text, figures_dir)
-            markdown_segments.append(markdown_text.strip())
+            normalized_markdown = markdown_text.strip()
+            fallback_text = ""
+            if not normalized_markdown:
+                fallback_text = _yomitoku_words_fallback(results)
+                if fallback_text:
+                    normalized_markdown = fallback_text
+                    used_word_fallback = True
 
-            plain_markdown = _markdown_to_plain_text(markdown_text)
+            markdown_segments.append(normalized_markdown)
+
+            plain_markdown = _markdown_to_plain_text(normalized_markdown)
             if plain_markdown:
                 plain_segments.append(plain_markdown)
             else:
                 extracted_plain = _yomitoku_plain_from_results(results)
+                if not extracted_plain:
+                    extracted_plain = fallback_text or _yomitoku_words_fallback(results)
+                    if extracted_plain and not fallback_text:
+                        used_word_fallback = True
+                        markdown_segments[-1] = f"{normalized_markdown}\n\n{extracted_plain}".strip()
                 if extracted_plain:
                     plain_segments.append(extracted_plain)
 
@@ -886,6 +1020,13 @@ def _run_yomitoku_variant(input_paths: Sequence[Path], work_dir: Path) -> OCRVar
 
     preview_text = _trim_preview(combined_markdown, combined_plain)
 
+    extras = {
+        "pages": total_pages,
+        "device": device,
+        "figure_letter": export_figure_letter,
+        "word_fallback_used": used_word_fallback,
+    }
+
     return OCRVariantArtifacts(
         key=descriptor.key,
         label=descriptor.label,
@@ -898,7 +1039,7 @@ def _run_yomitoku_variant(input_paths: Sequence[Path], work_dir: Path) -> OCRVar
         crop_images=crop_paths,
         preview_text=preview_text,
         preview_image=preview_image,
-        extras={"pages": total_pages, "device": device},
+        extras=extras,
     )
 
 
@@ -964,6 +1105,7 @@ def run_ocr_bytes(
     image_size: int = 640,
     crop_mode: bool = True,
     attn_impl: str = "flash_attention_2",
+    model_options: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, object]:
     """Run OCR on an in-memory image and return artefacts for web responses."""
 
@@ -981,6 +1123,7 @@ def run_ocr_bytes(
         image_size=image_size,
         crop_mode=crop_mode,
         attn_impl=attn_impl,
+        model_options=model_options,
     )
 
 
@@ -995,6 +1138,7 @@ def run_ocr_uploads(
     image_size: int = 640,
     crop_mode: bool = True,
     attn_impl: str = "flash_attention_2",
+    model_options: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, object]:
     """Run OCR on one or more uploaded files and persist results."""
 
@@ -1002,6 +1146,11 @@ def run_ocr_uploads(
         raise ValueError("No uploads provided")
 
     selected_models = _normalize_model_selection(models)
+    options_by_model: Mapping[str, Any]
+    if isinstance(model_options, Mapping):
+        options_by_model = model_options
+    else:
+        options_by_model = {}
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_path = Path(tmpdir)
@@ -1062,7 +1211,21 @@ def run_ocr_uploads(
                         attn_impl=attn_impl,
                     )
                 elif key == "yomitoku":
-                    variant = _run_yomitoku_variant(processed_images, work_dir)
+                    yomitoku_options: Any = None
+                    try:
+                        yomitoku_options = options_by_model.get("yomitoku")
+                    except AttributeError:
+                        yomitoku_options = None
+                    export_figure_letter = False
+                    if isinstance(yomitoku_options, Mapping):
+                        export_figure_letter = bool(yomitoku_options.get("figure_letter"))
+                    elif isinstance(yomitoku_options, bool):
+                        export_figure_letter = yomitoku_options
+                    variant = _run_yomitoku_variant(
+                        processed_images,
+                        work_dir,
+                        export_figure_letter=export_figure_letter,
+                    )
                 else:
                     raise ValueError(f"Unsupported OCR model '{key}'")
                 elapsed = time.perf_counter() - start_time
