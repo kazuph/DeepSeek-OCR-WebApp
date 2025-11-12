@@ -38,8 +38,8 @@ Web UI と同じ FastAPI アプリケーションが JSON ベースの API を�
 | メソッド | パス | 説明 |
 | --- | --- | --- |
 | `GET` | `/api/ping` | サーバーの疎通確認。 `{ "status": "ok" }` を返します。 |
-| `GET` | `/api/models` | 利用可能な OCR モデルの一覧。`key` と `label` を返します。 |
-| `POST` | `/api/ocr` | ファイルをアップロードして OCR を実行。フォームデータで `file`（必須）、`prompt`（任意）、`models`（カンマ区切り／任意）、`history_id`（任意・既存履歴へ追記）を渡します。複数モデルを指定すると `variants` 配列で集約結果が返ります。 |
+| `GET` | `/api/models` | 利用可能な OCR モデルの一覧。`key`、`label`、各モデルの `options` を返します。 |
+| `POST` | `/api/ocr` | ファイルをアップロードして OCR を実行。フォームデータで `file`（必須）、`prompt`（任意）、`models`（カンマ区切り／任意）、`history_id`（任意・既存履歴へ追記）、`model_options`（任意・JSON 文字列）を渡します。複数モデルを指定すると `variants` 配列で集約結果が返ります。 |
 | `GET` | `/api/history` | 保存済み履歴の一覧。直近のエントリが降順で返り、プレビュー用のテキスト／画像 URL が含まれます。 |
 | `GET` | `/api/history/{entry_id}` | 特定履歴の詳細。`variants` にモデルごとの出力、`input_images` に元入力のダウンロード URL が含まれます。 |
 | `DELETE` | `/api/history/{entry_id}` | 指定された履歴を削除します。関連ファイルは `web_history/{entry_id}` から削除されます。 |
@@ -55,6 +55,8 @@ Web UI と同じ FastAPI アプリケーションが JSON ベースの API を�
 curl http://<host>:8080/api/models | jq
 ```
 
+各モデルの `key`、`label`、利用可能な `options` が配列で返されます。`options` には各オプションの `key`、`label`、`description`、`default` 値が含まれます。
+
 #### `/api/ocr`
 
 ```bash
@@ -68,6 +70,22 @@ curl -X POST \
 レスポンスでは `history_id` に保存済みエントリの ID、`variants` にモデルごとの結果、`input_images` に元ファイルのアクセス URL が含まれます。複数モデルを指定した場合は `variants` に各モデルの枠が順番に入ります。
 
 既存の履歴に追記したい場合は、2 回目以降のリクエストで `-F "history_id=<前回のID>"` を追加します。これにより同じ履歴 ID に各モデルの結果がまとまり、履歴復元時にも全モデル分が表示されます。
+
+#### モデル固有のオプション指定
+
+`model_options` パラメータで、モデル固有のオプションを JSON 形式で指定できます。例えば、YomiToku の `figure_letter` オプションを有効にする場合：
+
+```bash
+curl -X POST \
+  -F "file=@tests/fixtures/doc.png" \
+  -F "models=yomitoku" \
+  -F 'model_options={"yomitoku":{"figure_letter":true}}' \
+  http://<host>:8080/api/ocr | jq
+```
+
+利用可能なオプションは `/api/models` エンドポイントで確認できます：
+- **yomitoku**:
+  - `figure_letter` (boolean): 絵や図の中の文字も抽出。YomiToku の `--figure_letter` オプション相当。ページ全体を図として検出してしまう絵本・縦書き原稿向け。
 
 #### `/api/history` と `/api/history/{id}`
 
