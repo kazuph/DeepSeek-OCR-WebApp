@@ -622,10 +622,23 @@ def _load_yomitoku_pages(input_path: Path) -> List[np.ndarray]:
     from yomitoku.data.functions import load_image, load_pdf  # type: ignore
 
     suffix = input_path.suffix.lower()
+    LOGGER.info(f"YomiToku loading file: {input_path} (suffix: {suffix})")
+    
     if suffix == ".pdf":
         pages = load_pdf(str(input_path))
     else:
-        pages = load_image(str(input_path))
+        try:
+            pages = load_image(str(input_path))
+        except ValueError as exc:
+            # Provide more helpful error message for unsupported formats
+            supported_formats = ['jpg', 'jpeg', 'png', 'bmp', 'tiff', 'tif', 'pdf']
+            error_msg = (
+                f"YomiToku does not support the image format '{suffix or '(no extension)'}'. "
+                f"Supported formats: {', '.join(supported_formats)}"
+            )
+            LOGGER.error(f"{error_msg}. File: {input_path}")
+            raise ValueError(error_msg) from exc
+    
     if not pages:
         raise RuntimeError("YomiToku produced no renderable pages.")
     return pages
