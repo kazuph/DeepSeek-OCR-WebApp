@@ -140,7 +140,25 @@ WEB_HISTORY_DIR.mkdir(parents=True, exist_ok=True)
 MODEL_DESCRIPTORS: List[ModelDescriptor] = [
     ModelDescriptor(
         key="yomitoku",
-        label="YomiToku Document Analyzer",
+        label="YomiToku Document Analyzer (GPU)",
+        options=(
+            ModelOptionDescriptor(
+                key="figure_letter",
+                label="絵や図の中の文字も抽出",
+                description="YomiToku の --figure_letter 相当。ページ全体を図として検出してしまう絵本・縦書き原稿向け。",
+            ),
+            ModelOptionDescriptor(
+                key="reading_order",
+                label="読み順序を表示",
+                description="レイアウト解析画像に読み順序番号を表示します（YomiToku v0.9.5以降）。",
+                default=False,
+            ),
+        ),
+    ),
+    ModelDescriptor(
+        key="yomitoku-cpu",
+        label="YomiToku Document Analyzer (CPU)",
+        description="CPU推論版。GPU版より処理時間が長くなりますが、GPUなしでも動作します。",
         options=(
             ModelOptionDescriptor(
                 key="figure_letter",
@@ -173,9 +191,10 @@ MODEL_ORDER: Dict[str, int] = {descriptor.key: index for index, descriptor in en
 DEFAULT_MODEL_KEY = "deepseek"
 MODEL_EXECUTION_PRIORITY = {
     "yomitoku": 0,
-    "deepseek": 1,
-    # "deepseek-8bit": 2,
-    "deepseek-4bit": 2,
+    "yomitoku-cpu": 1,
+    "deepseek": 2,
+    # "deepseek-8bit": 3,
+    "deepseek-4bit": 3,
 }
 
 _CV2_MODULE = None
@@ -579,7 +598,15 @@ def _get_yomitoku_executor() -> ThreadPoolExecutor:
     return _YOMITOKU_EXECUTOR
 
 
-def _get_yomitoku_analyzer(device: str):
+def _get_yomitoku_analyzer(device: str = "cuda"):
+    """Get or create a YomiToku DocumentAnalyzer for the specified device.
+
+    Args:
+        device: Device to use for inference. Either "cuda" (GPU) or "cpu".
+
+    Returns:
+        DocumentAnalyzer instance configured for the specified device.
+    """
     key = (device, False)
     analyzer = _YOMITOKU_ANALYZERS.get(key)
     if analyzer is None:
@@ -587,6 +614,7 @@ def _get_yomitoku_analyzer(device: str):
 
         analyzer = DocumentAnalyzer(device=device, visualize=True, split_text_across_cells=True)
         _YOMITOKU_ANALYZERS[key] = analyzer
+        LOGGER.info(f"Initialized YomiToku DocumentAnalyzer with device={device}")
     return analyzer
 
 
@@ -937,9 +965,23 @@ def _run_yomitoku_variant(
     *,
     export_figure_letter: bool = False,
     export_reading_order: bool = False,
+    device: str = "cuda",
+    model_key: str = "yomitoku",
 ) -> OCRVariantArtifacts:
+    """Run YomiToku OCR variant.
+
+    Args:
+        input_paths: List of input image/PDF paths to process.
+        work_dir: Working directory for output artifacts.
+        export_figure_letter: Whether to extract text from figures.
+        export_reading_order: Whether to export reading order visualization.
+        device: Device for inference. Either "cuda" (GPU) or "cpu".
+        model_key: Model key for descriptor lookup ("yomitoku" or "yomitoku-cpu").
+
+    Returns:
+        OCRVariantArtifacts containing results and output paths.
+    """
     _require_cv2()
-    device = _get_device()
     analyzer = _get_yomitoku_analyzer(device)
 
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -948,7 +990,7 @@ def _run_yomitoku_variant(
     artifact_root.mkdir(parents=True, exist_ok=True)
     text_root.mkdir(parents=True, exist_ok=True)
 
-    descriptor = _descriptor_for("yomitoku")
+    descriptor = _descriptor_for(model_key)
     markdown_segments: List[str] = []
     plain_segments: List[str] = []
     crop_paths: List[Path] = []
@@ -1232,12 +1274,17 @@ def run_ocr_uploads(
                         crop_mode=crop_mode,
                         attn_impl=attn_impl,
                     )
-                elif key == "yomitoku":
+                elif key in ("yomitoku", "yomitoku-cpu"):
+                    # Determine device based on model key
+                    device = "cpu" if key == "yomitoku-cpu" else "cuda"
+
+                    # Get model options
                     yomitoku_options: Any = None
                     try:
-                        yomitoku_options = options_by_model.get("yomitoku")
+                        yomitoku_options = options_by_model.get(key)
                     except AttributeError:
                         yomitoku_options = None
+
                     export_figure_letter = False
                     export_reading_order = False
                     if isinstance(yomitoku_options, Mapping):
@@ -1245,11 +1292,14 @@ def run_ocr_uploads(
                         export_reading_order = bool(yomitoku_options.get("reading_order"))
                     elif isinstance(yomitoku_options, bool):
                         export_figure_letter = yomitoku_options
+
                     variant = _run_yomitoku_variant(
                         processed_images,
                         work_dir,
                         export_figure_letter=export_figure_letter,
                         export_reading_order=export_reading_order,
+                        device=device,
+                        model_key=key,
                     )
                 else:
                     raise ValueError(f"Unsupported OCR model '{key}'")
@@ -1259,6 +1309,17 @@ def run_ocr_uploads(
                 extras["inputs"] = len(processed_images)
                 variant.extras = extras
                 variant_results.append(variant)
+            except ValueError as exc:
+                # Handle YomiToku image size validation errors
+                error_msg = str(exc)
+                if "Image size is too small" in error_msg:
+                    user_friendly_msg = f"{descriptor.label}: 画像サイズが小さすぎます（最小32ピクセル、推奨720ピクセル以上）"
+                    LOGGER.warning("%s: %s", descriptor.label, user_friendly_msg)
+                    variant_errors.append(user_friendly_msg)
+                else:
+                    LOGGER.exception("%s failed during OCR", descriptor.label)
+                    variant_errors.append(f"{descriptor.label}: {exc}")
+                continue
             except Exception as exc:  # noqa: BLE001
                 LOGGER.exception("%s failed during OCR", descriptor.label)
                 variant_errors.append(f"{descriptor.label}: {exc}")
