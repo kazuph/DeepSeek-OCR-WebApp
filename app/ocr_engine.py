@@ -118,6 +118,8 @@ class OCRVariantArtifacts:
     bounding_image: Optional[Path] = None
     crop_images: List[Path] = field(default_factory=list)
     bounding_images: List[Path] = field(default_factory=list)
+    layout_image: Optional[Path] = None
+    layout_images: List[Path] = field(default_factory=list)
     preview_text: str = ""
     preview_image: Optional[Path] = None
     extras: Dict[str, object] | None = None
@@ -144,6 +146,12 @@ MODEL_DESCRIPTORS: List[ModelDescriptor] = [
                 key="figure_letter",
                 label="絵や図の中の文字も抽出",
                 description="YomiToku の --figure_letter 相当。ページ全体を図として検出してしまう絵本・縦書き原稿向け。",
+            ),
+            ModelOptionDescriptor(
+                key="reading_order",
+                label="読み順序を表示",
+                description="レイアウト解析画像に読み順序番号を表示します（YomiToku v0.9.5以降）。",
+                default=False,
             ),
         ),
     ),
@@ -928,6 +936,7 @@ def _run_yomitoku_variant(
     work_dir: Path,
     *,
     export_figure_letter: bool = False,
+    export_reading_order: bool = False,
 ) -> OCRVariantArtifacts:
     _require_cv2()
     device = _get_device()
@@ -945,6 +954,8 @@ def _run_yomitoku_variant(
     crop_paths: List[Path] = []
     bounding_path: Optional[Path] = None
     bounding_paths: List[Path] = []
+    layout_path: Optional[Path] = None
+    layout_paths: List[Path] = []
     preview_image: Optional[Path] = None
     used_word_fallback = False
 
@@ -956,7 +967,7 @@ def _run_yomitoku_variant(
         for page_index, image in enumerate(pages, start=1):
             total_pages += 1
             future = executor.submit(analyzer, image)
-            results, ocr_vis, _ = future.result()
+            results, ocr_vis, layout_vis = future.result()
             page_slug = f"{input_path.stem}_page{page_index:02d}"
             page_text_path = text_root / f"{page_slug}.md"
             figures_dir = artifact_root / "figures" / page_slug
@@ -1001,6 +1012,14 @@ def _run_yomitoku_variant(
                 if preview_image is None:
                     preview_image = page_bounding_path
 
+            if export_reading_order and layout_vis is not None:
+                page_layout_path = artifact_root / f"{page_slug}_layout.jpg"
+                cv2_module = _get_cv2()
+                cv2_module.imwrite(str(page_layout_path), layout_vis)
+                layout_paths.append(page_layout_path)
+                if layout_path is None:
+                    layout_path = page_layout_path
+
             page_figures_dir = artifact_root / "figures" / page_slug
             if page_figures_dir.exists():
                 crop_paths.extend(sorted(p for p in page_figures_dir.rglob("*") if p.is_file()))
@@ -1024,6 +1043,7 @@ def _run_yomitoku_variant(
         "pages": total_pages,
         "device": device,
         "figure_letter": export_figure_letter,
+        "reading_order": export_reading_order,
         "word_fallback_used": used_word_fallback,
     }
 
@@ -1036,6 +1056,8 @@ def _run_yomitoku_variant(
         text_path=combined_text_path,
         bounding_image=bounding_path,
         bounding_images=bounding_paths,
+        layout_image=layout_path,
+        layout_images=layout_paths,
         crop_images=crop_paths,
         preview_text=preview_text,
         preview_image=preview_image,
@@ -1217,14 +1239,17 @@ def run_ocr_uploads(
                     except AttributeError:
                         yomitoku_options = None
                     export_figure_letter = False
+                    export_reading_order = False
                     if isinstance(yomitoku_options, Mapping):
                         export_figure_letter = bool(yomitoku_options.get("figure_letter"))
+                        export_reading_order = bool(yomitoku_options.get("reading_order"))
                     elif isinstance(yomitoku_options, bool):
                         export_figure_letter = yomitoku_options
                     variant = _run_yomitoku_variant(
                         processed_images,
                         work_dir,
                         export_figure_letter=export_figure_letter,
+                        export_reading_order=export_reading_order,
                     )
                 else:
                     raise ValueError(f"Unsupported OCR model '{key}'")
@@ -1281,7 +1306,7 @@ def run_ocr_uploads(
                 variant_payloads.append(_build_variant_response(entry_id, entry_dir, metadata, variant_meta))
         else:
             descriptor = _descriptor_for(metadata.get("primary_model"))
-            bounding_url, bounding_images, crops, preview_url = _build_image_urls(entry_id, entry_dir, metadata)
+            bounding_url, bounding_images, layout_url, layout_images, crops, preview_url = _build_image_urls(entry_id, entry_dir, metadata)
             variant_payloads.append(
                 {
                     "model": descriptor.key,
@@ -1290,6 +1315,8 @@ def run_ocr_uploads(
                     "text_markdown": metadata.get("text_markdown", ""),
                     "bounding_image_url": bounding_url,
                     "bounding_images": bounding_images,
+                    "layout_image_url": layout_url,
+                    "layout_images": layout_images,
                     "crops": crops,
                     "preview_image_url": preview_url,
                     "preview": metadata.get("preview", ""),
@@ -1455,7 +1482,7 @@ def _build_image_urls(
     entry_dir: Path,
     metadata: dict[str, object],
     model: Optional[str] = None,
-) -> tuple[Optional[str], List[dict[str, str]], List[dict[str, str]], Optional[str]]:
+) -> tuple[Optional[str], List[dict[str, str]], Optional[str], List[dict[str, str]], List[dict[str, str]], Optional[str]]:
     base_url = f"/api/history/{entry_id}"
     variant_meta, variant_key = select_variant(metadata, model)
 
@@ -1486,6 +1513,34 @@ def _build_image_urls(
 
     if bounding_url is None and bounding_images:
         bounding_url = bounding_images[0]["url"]
+
+    layout_url = None
+    layout_rel = variant_meta.get("layout_image")
+    layout_rel_str = str(layout_rel) if layout_rel else None
+    if layout_rel_str:
+        layout_url = _append_model_query(f"{base_url}/image/layout", variant_key)
+
+    raw_layout_paths = []
+    layout_list = variant_meta.get("layout_images")
+    if isinstance(layout_list, list):
+        raw_layout_paths = [str(rel_path) for rel_path in layout_list]
+    if not raw_layout_paths and layout_rel_str:
+        raw_layout_paths = [layout_rel_str]
+
+    layout_images: List[dict[str, str]] = []
+    for rel_str in raw_layout_paths:
+        url = f"{base_url}/image/layout/{quote(rel_str, safe='/')}"
+        url = _append_model_query(url, variant_key)
+        layout_images.append(
+            {
+                "name": Path(rel_str).name,
+                "path": rel_str,
+                "url": url,
+            }
+        )
+
+    if layout_url is None and layout_images:
+        layout_url = layout_images[0]["url"]
 
     raw_crop_paths = [str(rel_path) for rel_path in variant_meta.get("crops", [])]
     crop_path_set = set(raw_crop_paths)
@@ -1524,7 +1579,7 @@ def _build_image_urls(
     if preview_url is None:
         preview_url = bounding_url or (bounding_images[0]["url"] if bounding_images else None) or (crops[0]["url"] if crops else None)
 
-    return bounding_url, bounding_images, crops, preview_url
+    return bounding_url, bounding_images, layout_url, layout_images, crops, preview_url
 
 
 def _build_variant_response(
@@ -1535,15 +1590,18 @@ def _build_variant_response(
 ) -> dict[str, object]:
     variant_key = variant_meta.get("model")
     descriptor = _descriptor_for(variant_key)
-    bounding_url, bounding_images, crops, preview_url = _build_image_urls(entry_id, entry_dir, metadata, variant_key)
+    bounding_url, bounding_images, layout_url, layout_images, crops, preview_url = _build_image_urls(entry_id, entry_dir, metadata, variant_key)
     extras = variant_meta.get("extras") or {}
     variant_metadata = {
         "text_path": variant_meta.get("text_path"),
         "bounding_image_path": variant_meta.get("bounding_image"),
+        "layout_image_path": variant_meta.get("layout_image"),
         **extras,
     }
     if bounding_images:
         variant_metadata.setdefault("bounding_images", [item["path"] for item in bounding_images])
+    if layout_images:
+        variant_metadata.setdefault("layout_images", [item["path"] for item in layout_images])
     return {
         "model": descriptor.key,
         "label": variant_meta.get("label", descriptor.label),
@@ -1551,6 +1609,8 @@ def _build_variant_response(
         "text_markdown": variant_meta.get("text_markdown", ""),
         "bounding_image_url": bounding_url,
         "bounding_images": bounding_images,
+        "layout_image_url": layout_url,
+        "layout_images": layout_images,
         "crops": crops,
         "preview_image_url": preview_url,
         "preview": variant_meta.get("preview", ""),
@@ -1604,6 +1664,27 @@ def _store_variant_entry(entry_dir: Path, variant: OCRVariantArtifacts) -> dict[
     if bounding_rel is None and bounding_rel_paths:
         bounding_rel = bounding_rel_paths[0]
 
+    layout_rel = None
+    layout_rel_paths: List[str] = []
+    if variant.layout_image:
+        try:
+            rel = Path("artifacts") / variant.layout_image.relative_to(variant.artifact_dir)
+        except ValueError:
+            rel = Path("artifacts") / variant.layout_image.name
+        layout_rel = rel.as_posix()
+
+    for layout_path in variant.layout_images:
+        try:
+            rel = Path("artifacts") / layout_path.relative_to(variant.artifact_dir)
+        except ValueError:
+            rel = Path("artifacts") / layout_path.name
+        rel_str = rel.as_posix()
+        if rel_str not in layout_rel_paths:
+            layout_rel_paths.append(rel_str)
+
+    if layout_rel is None and layout_rel_paths:
+        layout_rel = layout_rel_paths[0]
+
     crop_rel_paths: List[str] = []
     for crop_path in variant.crop_images:
         try:
@@ -1629,6 +1710,8 @@ def _store_variant_entry(entry_dir: Path, variant: OCRVariantArtifacts) -> dict[
         "text_markdown": variant.text_markdown,
         "bounding_image": bounding_rel,
         "bounding_images": bounding_rel_paths,
+        "layout_image": layout_rel,
+        "layout_images": layout_rel_paths,
         "crops": crop_rel_paths,
         "preview": variant.preview_text,
         "preview_image": preview_rel,
@@ -1800,7 +1883,7 @@ def list_history_entries(limit: int | None = None) -> List[dict[str, object]]:
             continue
 
         entry_id = metadata.get("id", entry_dir.name)
-        _, _, _, preview_url = _build_image_urls(entry_id, entry_dir, metadata)
+        _, _, _, _, _, preview_url = _build_image_urls(entry_id, entry_dir, metadata)
 
         models = metadata.get("models")
         if not models and isinstance(metadata.get("variants"), list):
@@ -1835,7 +1918,7 @@ def load_history_entry(entry_id: str) -> dict[str, object]:
             variants_payload.append(_build_variant_response(entry_id, entry_dir, metadata, variant_meta))
     else:
         descriptor = _descriptor_for(metadata.get("primary_model"))
-        bounding_url, bounding_images, crops, preview_url = _build_image_urls(entry_id, entry_dir, metadata)
+        bounding_url, bounding_images, layout_url, layout_images, crops, preview_url = _build_image_urls(entry_id, entry_dir, metadata)
         variants_payload.append(
             {
                 "model": descriptor.key,
@@ -1844,6 +1927,8 @@ def load_history_entry(entry_id: str) -> dict[str, object]:
                 "text_markdown": metadata.get("text_markdown", ""),
                 "bounding_image_url": bounding_url,
                 "bounding_images": bounding_images,
+                "layout_image_url": layout_url,
+                "layout_images": layout_images,
                 "crops": crops,
                 "preview_image_url": preview_url,
                 "preview": metadata.get("preview", ""),

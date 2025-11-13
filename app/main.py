@@ -188,6 +188,28 @@ async def history_bounding_image(entry_id: str, model: str | None = Query(defaul
     return FileResponse(path)
 
 
+@app.get("/api/history/{entry_id}/image/layout")
+async def history_layout_image(entry_id: str, model: str | None = Query(default=None)) -> FileResponse:
+    try:
+        metadata, entry_dir = _load_entry_metadata(entry_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="History entry not found") from exc
+
+    variant_meta, variant_key = select_variant(metadata, model)
+    layout_name = variant_meta.get("layout_image")
+    if not layout_name:
+        layout_list = variant_meta.get("layout_images")
+        if not layout_list and variant_meta is not metadata:
+            layout_list = metadata.get("layout_images")
+        if isinstance(layout_list, list) and layout_list:
+            layout_name = str(layout_list[0])
+    if not layout_name:
+        raise HTTPException(status_code=404, detail="Layout image not found")
+
+    path = _resolve_history_file(entry_dir, layout_name, variant_key)
+    return FileResponse(path)
+
+
 @app.get("/api/history/{entry_id}/image/bounding/{file_path:path}")
 async def history_bounding_image_multi(entry_id: str, file_path: str, model: str | None = Query(default=None)) -> FileResponse:
     try:
@@ -219,6 +241,42 @@ async def history_bounding_image_multi(entry_id: str, file_path: str, model: str
 
     if candidate not in allowed:
         raise HTTPException(status_code=404, detail="Bounding image not found")
+
+    path = _resolve_history_file(entry_dir, candidate, variant_key)
+    return FileResponse(path)
+
+
+@app.get("/api/history/{entry_id}/image/layout/{file_path:path}")
+async def history_layout_image_multi(entry_id: str, file_path: str, model: str | None = Query(default=None)) -> FileResponse:
+    try:
+        metadata, entry_dir = _load_entry_metadata(entry_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="History entry not found") from exc
+
+    variant_meta, variant_key = select_variant(metadata, model)
+
+    allowed_raw = variant_meta.get("layout_images")
+    if not allowed_raw and variant_meta is not metadata:
+        allowed_raw = metadata.get("layout_images")
+
+    allowed: set[str] = set()
+    if isinstance(allowed_raw, list):
+        allowed |= {str(item) for item in allowed_raw if item}
+
+    single = variant_meta.get("layout_image")
+    if single:
+        allowed.add(str(single))
+
+    if not allowed:
+        raise HTTPException(status_code=404, detail="Layout image not found")
+
+    names = {Path(item).name for item in allowed}
+    candidate = file_path
+    if candidate not in allowed and Path(candidate).name in names:
+        candidate = Path(candidate).name
+
+    if candidate not in allowed:
+        raise HTTPException(status_code=404, detail="Layout image not found")
 
     path = _resolve_history_file(entry_dir, candidate, variant_key)
     return FileResponse(path)

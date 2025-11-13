@@ -1676,6 +1676,30 @@ function normalizeBoundingImages(images, fallbackUrl = null, label = 'bounding')
   return result;
 }
 
+function normalizeLayoutImages(images, fallbackUrl = null, label = 'layout') {
+  const result = [];
+  if (Array.isArray(images)) {
+    images.forEach((item, index) => {
+      if (!item) return;
+      const url = item.url || null;
+      if (!url) return;
+      const name = item.name || `${label || 'layout'}-${index + 1}`;
+      const path = item.path || url;
+      result.push({ name, path, url });
+    });
+  }
+
+  if (!result.length && fallbackUrl) {
+    result.push({
+      name: `${label || 'layout'}-1`,
+      path: fallbackUrl,
+      url: fallbackUrl,
+    });
+  }
+
+  return result;
+}
+
 function normalizeVariants(data) {
   if (Array.isArray(data?.variants) && data.variants.length) {
     return data.variants.map((variant, index) => ({
@@ -1685,6 +1709,8 @@ function normalizeVariants(data) {
       textMarkdown: variant.text_markdown || '',
       boundingUrl: variant.bounding_image_url || null,
       boundingImages: normalizeBoundingImages(variant.bounding_images, variant.bounding_image_url, variant.label),
+      layoutUrl: variant.layout_image_url || null,
+      layoutImages: normalizeLayoutImages(variant.layout_images, variant.layout_image_url, variant.label),
       crops: Array.isArray(variant.crops) ? variant.crops : [],
       previewUrl: variant.preview_image_url || null,
       metadata: variant.metadata || {},
@@ -1701,6 +1727,8 @@ function normalizeVariants(data) {
       textMarkdown: data?.text_markdown || '',
       boundingUrl: data?.bounding_image_url || null,
       boundingImages: normalizeBoundingImages(data?.bounding_images, data?.bounding_image_url, data?.metadata?.model_label || data?.metadata?.model),
+      layoutUrl: data?.layout_image_url || null,
+      layoutImages: normalizeLayoutImages(data?.layout_images, data?.layout_image_url, data?.metadata?.model_label || data?.metadata?.model),
       crops: Array.isArray(data?.crops) ? data.crops : [],
       previewUrl: data?.preview_image_url || null,
       metadata: data?.metadata || {},
@@ -1888,18 +1916,27 @@ function renderBoundingVariants(variants, context) {
     card.className = 'variant-card bounding-card';
     card.dataset.model = variant.key;
 
+    // Prefer layout images (with reading order) over bounding images
+    const layoutImages = Array.isArray(variant.layoutImages)
+      ? variant.layoutImages
+      : normalizeLayoutImages(variant.layout_images, variant.layoutUrl, variant.label);
+
     const boundingImages = Array.isArray(variant.boundingImages)
       ? variant.boundingImages
       : normalizeBoundingImages(variant.bounding_images, variant.boundingUrl, variant.label);
 
+    // Use layout images if available, otherwise fall back to bounding images
+    const displayImages = layoutImages.length > 0 ? layoutImages : boundingImages;
+    const imageType = layoutImages.length > 0 ? 'レイアウト' : 'バウンディング';
+
     const header = createVariantHeader(
       variant,
       context,
-      boundingImages.length ? `バウンディング: ${boundingImages.length}件` : ''
+      displayImages.length ? `${imageType}: ${displayImages.length}件` : ''
     );
     card.appendChild(header);
 
-    if (!boundingImages.length) {
+    if (!displayImages.length) {
       const empty = document.createElement('p');
       empty.className = 'metadata';
       empty.textContent = 'バウンディング画像は生成されませんでした。';
@@ -1921,12 +1958,12 @@ function renderBoundingVariants(variants, context) {
     frame.appendChild(image);
 
     frame.addEventListener('click', () => {
-      const current = boundingImages[currentIndex];
+      const current = displayImages[currentIndex];
       if (!current || !current.url) return;
       openModal({
-        type: 'bounding',
+        type: imageType === 'レイアウト' ? 'layout' : 'bounding',
         url: current.url,
-        name: current.name || `${context.downloadBase}-${variant.key}-bounding-${currentIndex + 1}`,
+        name: current.name || `${context.downloadBase}-${variant.key}-${imageType === 'レイアウト' ? 'layout' : 'bounding'}-${currentIndex + 1}`,
       });
     });
 
@@ -1936,23 +1973,23 @@ function renderBoundingVariants(variants, context) {
     const actions = document.createElement('div');
     actions.className = 'variant-card-actions bounding-actions';
 
-    const copyBtn = createIconButton('copy', 'バウンディング画像をコピー', async () => {
-      const current = boundingImages[currentIndex];
+    const copyBtn = createIconButton('copy', `${imageType}画像をコピー`, async () => {
+      const current = displayImages[currentIndex];
       if (!current || !current.url) return;
       try {
         await copyImageToClipboard(current.url);
-        setStatus('バウンディング画像をコピーしました。');
+        setStatus(`${imageType}画像をコピーしました。`);
       } catch (error) {
         console.error(error);
         setStatus('画像をコピーできませんでした。', true);
       }
     });
 
-    const downloadBtn = createIconButton('download', 'バウンディング画像をDL', () => {
-      const current = boundingImages[currentIndex];
+    const downloadBtn = createIconButton('download', `${imageType}画像をDL`, () => {
+      const current = displayImages[currentIndex];
       if (!current || !current.url) return;
       const ext = inferExtensionFromDataUrl(current.url, 'jpg');
-      downloadDataUrl(current.url, `${context.downloadBase}-${variant.key}-bounding-${currentIndex + 1}.${ext}`);
+      downloadDataUrl(current.url, `${context.downloadBase}-${variant.key}-${imageType === 'レイアウト' ? 'layout' : 'bounding'}-${currentIndex + 1}.${ext}`);
     });
 
     actions.append(copyBtn, downloadBtn);
@@ -1973,7 +2010,7 @@ function renderBoundingVariants(variants, context) {
     nav.append(prevBtn, indicator, nextBtn);
 
     const updateViewer = (index) => {
-      const total = boundingImages.length;
+      const total = displayImages.length;
       if (!total) {
         image.src = '';
         indicator.textContent = '';
@@ -1983,9 +2020,9 @@ function renderBoundingVariants(variants, context) {
       }
       const bounded = Math.max(0, Math.min(index, total - 1));
       currentIndex = bounded;
-      const current = boundingImages[currentIndex];
+      const current = displayImages[currentIndex];
       image.src = current?.url || '';
-      image.alt = `${variant.label} のバウンディング画像 ${currentIndex + 1}/${total}`;
+      image.alt = `${variant.label} の${imageType}画像 ${currentIndex + 1}/${total}`;
       indicator.textContent = `${currentIndex + 1} / ${total}`;
       prevBtn.disabled = currentIndex === 0;
       nextBtn.disabled = currentIndex === total - 1;
@@ -1997,7 +2034,7 @@ function renderBoundingVariants(variants, context) {
     });
 
     nextBtn.addEventListener('click', () => {
-      if (currentIndex >= boundingImages.length - 1) return;
+      if (currentIndex >= displayImages.length - 1) return;
       updateViewer(currentIndex + 1);
     });
 
