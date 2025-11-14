@@ -321,6 +321,72 @@ h1 {
   line-height: 1.4;
 }
 
+.reading-order-group {
+  border-top: 1px dashed rgba(255, 255, 255, 0.1);
+  padding-top: 6px;
+  margin-top: 4px;
+}
+
+.reading-order-options {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+
+.reading-order-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-size: 12px;
+}
+
+.prompt-card {
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  padding-top: 10px;
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.prompt-card-header {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.prompt-radio-group {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.prompt-radio-group label {
+  display: inline-flex;
+  gap: 0.35rem;
+  align-items: center;
+  font-size: 12px;
+}
+
+.prompt-textarea {
+  width: 100%;
+  min-height: 120px;
+  padding: 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  background: rgba(0, 0, 0, 0.2);
+  color: #fff;
+  font-family: var(--font-monospace, 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace);
+  font-size: 13px;
+  line-height: 1.4;
+  resize: vertical;
+}
+
+.prompt-actions-inline {
+  display: flex;
+  justify-content: flex-end;
+}
+
 .model-option-status {
   font-size: 12px;
   font-weight: 600;
@@ -525,40 +591,7 @@ h1 {
   transition: width 0.35s ease;
 }
 
-.prompt-section {
-  margin-bottom: 18px;
-}
 
-.prompt-section details {
-  background: rgba(255, 255, 255, 0.05);
-  border-radius: 10px;
-  padding: 12px 16px;
-}
-
-.prompt-section summary {
-  font-weight: 600;
-  cursor: pointer;
-  outline: none;
-}
-
-.prompt-input {
-  width: 100%;
-  margin-top: 12px;
-  padding: 10px 12px;
-  border-radius: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: rgba(0, 0, 0, 0.35);
-  color: inherit;
-  resize: vertical;
-  min-height: 110px;
-  font-size: 14px;
-}
-
-.prompt-actions {
-  display: flex;
-  justify-content: flex-end;
-  margin-top: 10px;
-}
 
 .preview-grid {
   display: grid;

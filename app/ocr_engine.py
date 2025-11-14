@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import base64
 import json
 import logging
@@ -28,6 +29,7 @@ import torch
 from transformers import AutoModel, AutoTokenizer, BitsAndBytesConfig
 from transformers.cache_utils import DynamicCache
 from transformers.models.llama import modeling_llama
+from PIL import Image, ImageDraw, ImageFont
 
 # ---------------------------------------------------------------------------
 # Compatibility patches for varying transformers installations
@@ -153,6 +155,18 @@ MODEL_DESCRIPTORS: List[ModelDescriptor] = [
                 description="レイアウト解析画像に読み順序番号を表示します（YomiToku v0.9.5以降）。",
                 default=False,
             ),
+            ModelOptionDescriptor(
+                key="lite",
+                label="Lite モード",
+                description="パラメータを削減した軽量モデルを使用します（速度優先）",
+                default=False,
+            ),
+            ModelOptionDescriptor(
+                key="ignore_line_break",
+                label="改行を無視",
+                description="段落内の改行を削除してスラッシュを抑止します。",
+                default=True,
+            ),
         ),
     ),
     ModelDescriptor(
@@ -171,9 +185,32 @@ MODEL_DESCRIPTORS: List[ModelDescriptor] = [
                 description="レイアウト解析画像に読み順序番号を表示します（YomiToku v0.9.5以降）。",
                 default=False,
             ),
+            ModelOptionDescriptor(
+                key="lite",
+                label="Lite モード",
+                description="パラメータを削減した軽量モデルを使用します（速度優先）",
+                default=False,
+            ),
+            ModelOptionDescriptor(
+                key="ignore_line_break",
+                label="改行を無視",
+                description="段落内の改行を削除してスラッシュを抑止します。",
+                default=True,
+            ),
         ),
     ),
-    ModelDescriptor(key="deepseek", label="DeepSeek OCR"),
+    ModelDescriptor(
+        key="deepseek",
+        label="DeepSeek OCR",
+        options=(
+            ModelOptionDescriptor(
+                key="reading_order",
+                label="読み順序を表示",
+                description="バウンディング画像に読み順序の赤線と番号を重ねます。",
+                default=False,
+            ),
+        ),
+    ),
 #    ModelDescriptor(
 #        key="deepseek-8bit",
 #        label="DeepSeek OCR (8-bit Quantized)",
@@ -183,6 +220,14 @@ MODEL_DESCRIPTORS: List[ModelDescriptor] = [
         key="deepseek-4bit",
         label="DeepSeek OCR (4-bit Quantized)",
         description="BitsAndBytes 4-bit build for lower VRAM CUDA GPUs.",
+        options=(
+            ModelOptionDescriptor(
+                key="reading_order",
+                label="読み順序を表示",
+                description="バウンディング画像に読み順序の赤線と番号を重ねます。",
+                default=False,
+            ),
+        ),
     ),
 ]
 
@@ -200,6 +245,10 @@ MODEL_EXECUTION_PRIORITY = {
 _CV2_MODULE = None
 _YOMITOKU_EXECUTOR: Optional[ThreadPoolExecutor] = None
 LOGGER = logging.getLogger(__name__)
+
+_DEEPSEEK_HOOKED_MODULES: set[str] = set()
+
+_MAX_COLOR_COMPONENTS = 512
 
 
 # ---------------------------------------------------------------------------
@@ -224,6 +273,60 @@ def render_pdf(pdf_path: Path, target_dir: Path) -> List[Path]:
         raise RuntimeError(f"PDF '{pdf_path}' contains no pages")
 
     return rendered
+
+
+def _normalize_yomitoku_reading_order(value: object) -> str:
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in YOMITOKU_READING_ORDER_MODES:
+            return normalized
+    return YOMITOKU_READING_ORDER_DEFAULT
+
+
+def _attach_deepseek_reference_hook(model: AutoModel) -> None:
+    """Monkeypatch DeepSeek's process_image_with_refs to expose box metadata."""
+
+    module_name = getattr(model.__class__, "__module__", "")
+    if not module_name or "DeepSeek-OCR" not in module_name:
+        return
+    if module_name in _DEEPSEEK_HOOKED_MODULES:
+        return
+    try:
+        module = importlib.import_module(module_name)
+    except Exception:  # pragma: no cover - defensive import
+        return
+
+    if getattr(module, "_reading_order_hooked", False):
+        _DEEPSEEK_HOOKED_MODULES.add(module_name)
+        return
+
+    original = getattr(module, "process_image_with_refs", None)
+    if not callable(original):
+        return
+
+    def wrapped(image, ref_texts, output_path):  # type: ignore[no-untyped-def]
+        result_image = original(image, ref_texts, output_path)
+        try:
+            if ref_texts:
+                serialized: List[dict[str, object]] = []
+                for entry in ref_texts:
+                    label = ""
+                    coords = None
+                    if isinstance(entry, (list, tuple)):
+                        if len(entry) >= 2 and isinstance(entry[1], str):
+                            label = entry[1]
+                        if len(entry) >= 3:
+                            coords = entry[2]
+                    serialized.append({"label": label, "boxes": coords})
+                target = Path(output_path) / "reading_order_refs.json"
+                target.write_text(json.dumps(serialized, ensure_ascii=False), encoding="utf-8")
+        except Exception:  # pragma: no cover - best effort logging
+            LOGGER.exception("Failed to store DeepSeek reading-order metadata at %s", output_path)
+        return result_image
+
+    module.process_image_with_refs = wrapped  # type: ignore[assignment]
+    module._reading_order_hooked = True  # type: ignore[attr-defined]
+    _DEEPSEEK_HOOKED_MODULES.add(module_name)
 
 
 def collect_image_paths(inputs: Iterable[Path], work_dir: Path) -> List[Path]:
@@ -302,7 +405,9 @@ def encode_file_to_data_url(path: Path) -> str:
 _MODEL_CACHE: dict[tuple[str, str, str], tuple[AutoTokenizer, AutoModel]] = {}
 _QUANT_MODEL_CACHE: dict[tuple[str, str, str], tuple[AutoTokenizer, AutoModel]] = {}
 # _EIGHTBIT_MODEL_CACHE: dict[tuple[str, str, str], tuple[AutoTokenizer, AutoModel]] = {}
-_YOMITOKU_ANALYZERS: Dict[tuple[str, bool], object] = {}
+_YOMITOKU_ANALYZERS: Dict[tuple[str, str, bool], object] = {}
+YOMITOKU_READING_ORDER_MODES = {"auto", "top2bottom", "left2right", "right2left"}
+YOMITOKU_READING_ORDER_DEFAULT = "auto"
 DEFAULT_MODEL_NAME = "deepseek-ai/DeepSeek-OCR"
 QUANTIZED_MODEL_NAME = "Jalea96/DeepSeek-OCR-bnb-4bit-NF4"
 # EIGHTBIT_MODEL_ALIAS = "deepseek-ai/DeepSeek-OCR#8bit"
@@ -340,6 +445,8 @@ def get_model(model_name: str, attn_impl: str) -> tuple[AutoTokenizer, AutoModel
         model = model.eval().to(device="cuda", dtype=load_dtype)
     else:
         model = model.eval().to(torch.float32)
+
+    _attach_deepseek_reference_hook(model)
 
     _MODEL_CACHE[key] = (tokenizer, model)
     return tokenizer, model
@@ -413,6 +520,7 @@ def _get_quantized_model(model_repo: str, attn_impl: str) -> tuple[AutoTokenizer
             model.config.use_cache = True  # type: ignore[attr-defined]
         except Exception:  # pragma: no cover - best-effort safeguard
             pass
+    _attach_deepseek_reference_hook(model)
     _QUANT_MODEL_CACHE[cache_key] = (tokenizer, model)
     return tokenizer, model
 
@@ -598,23 +706,51 @@ def _get_yomitoku_executor() -> ThreadPoolExecutor:
     return _YOMITOKU_EXECUTOR
 
 
-def _get_yomitoku_analyzer(device: str = "cuda"):
+def _get_yomitoku_analyzer(
+    device: str = "cuda",
+    reading_order: str = YOMITOKU_READING_ORDER_DEFAULT,
+    lite_mode: bool = False,
+):
     """Get or create a YomiToku DocumentAnalyzer for the specified device.
 
     Args:
         device: Device to use for inference. Either "cuda" (GPU) or "cpu".
+        reading_order: Reading order hint passed to YomiToku (auto/left/right/etc.).
 
     Returns:
         DocumentAnalyzer instance configured for the specified device.
     """
-    key = (device, False)
+    key = (device, reading_order, bool(lite_mode))
     analyzer = _YOMITOKU_ANALYZERS.get(key)
     if analyzer is None:
         from yomitoku import DocumentAnalyzer  # type: ignore
 
-        analyzer = DocumentAnalyzer(device=device, visualize=True, split_text_across_cells=True)
+        configs: Dict[str, Any] = {}
+        if lite_mode:
+            configs = {
+                "ocr": {
+                    "text_recognizer": {
+                        "model_name": "parseq-tiny",
+                    },
+                },
+            }
+            if device == "cpu" or not torch.cuda.is_available():
+                configs.setdefault("ocr", {}).setdefault("text_detector", {})["infer_onnx"] = True
+
+        analyzer = DocumentAnalyzer(
+            configs=configs,
+            device=device,
+            visualize=True,
+            split_text_across_cells=True,
+            reading_order=reading_order,
+        )
         _YOMITOKU_ANALYZERS[key] = analyzer
-        LOGGER.info(f"Initialized YomiToku DocumentAnalyzer with device={device}")
+        LOGGER.info(
+            "Initialized YomiToku DocumentAnalyzer with device=%s, reading_order=%s, lite=%s",
+            device,
+            reading_order,
+            lite_mode,
+        )
     return analyzer
 
 
@@ -774,6 +910,7 @@ def _run_deepseek_variant(
     image_size: int,
     crop_mode: bool,
     attn_impl: str,
+    export_reading_order: bool = False,
 ) -> OCRVariantArtifacts:
     results = run_ocr_documents(
         input_paths,
@@ -800,6 +937,8 @@ def _run_deepseek_variant(
     bounding_path: Optional[Path] = None
     bounding_paths: List[Path] = []
     preview_image: Optional[Path] = None
+    layout_path: Optional[Path] = None
+    layout_paths: List[Path] = []
 
     for doc in results:
         if doc.text_markdown:
@@ -818,6 +957,13 @@ def _run_deepseek_variant(
                     preview_image = candidate_path
                 bounding_paths.append(candidate_path)
                 break
+
+        if export_reading_order:
+            layout_candidate = _generate_deepseek_reading_order_image(doc, page_bounding)
+            if layout_candidate:
+                layout_paths.append(layout_candidate)
+                if layout_path is None:
+                    layout_path = layout_candidate
 
         images_dir = doc.artifact_dir / "images"
         if images_dir.exists():
@@ -839,7 +985,11 @@ def _run_deepseek_variant(
 
     preview_text = _trim_preview(combined_markdown, combined_plain)
 
-    extras = {"attn_impl": attn_impl, "documents": len(results)}
+    extras = {
+        "attn_impl": attn_impl,
+        "documents": len(results),
+        "reading_order": export_reading_order,
+    }
 
     return OCRVariantArtifacts(
         key=descriptor.key,
@@ -850,6 +1000,8 @@ def _run_deepseek_variant(
         text_path=combined_text_path,
         bounding_image=bounding_path,
         bounding_images=bounding_paths,
+        layout_image=layout_path,
+        layout_images=layout_paths,
         crop_images=crop_paths,
         preview_text=preview_text,
         preview_image=preview_image,
@@ -858,6 +1010,379 @@ def _run_deepseek_variant(
 
 # def _run_8bit_deepseek_variant(...):
 #     pass
+
+
+def _generate_deepseek_reading_order_image(
+    doc: OCRDocumentResult,
+    bounding_candidate: Optional[Path],
+) -> Optional[Path]:
+    normalized_boxes: List[tuple[float, float, float, float]] = []
+
+    refs_path = doc.artifact_dir / "reading_order_refs.json"
+    references: List[tuple[str, tuple[float, float, float, float]]] = []
+    if refs_path.exists():
+        references = _load_deepseek_reference_file(refs_path)
+
+    if not references:
+        references = _extract_deepseek_reference_boxes(doc.text_markdown or "")
+
+    if references:
+        text_boxes = [box for label, box in references if label != "image"]
+        if text_boxes:
+            normalized_boxes = text_boxes
+
+    source_path = bounding_candidate
+    if source_path is None or not source_path.exists():
+        for candidate in ("result_with_boxes.jpg", "result_with_boxes.png"):
+            candidate_path = doc.artifact_dir / candidate
+            if candidate_path.exists():
+                source_path = candidate_path
+                break
+    if source_path is None or not source_path.exists():
+        return None
+
+    if not normalized_boxes:
+        normalized_boxes = _extract_boxes_from_bounding_bitmap(source_path, doc.image_path)
+    if not normalized_boxes:
+        return None
+
+    output_path = doc.artifact_dir / f"{doc.image_path.stem}_layout.jpg"
+    try:
+        success = _draw_deepseek_reading_order_overlay(source_path, normalized_boxes, output_path)
+    except Exception:  # pragma: no cover - visualization best effort
+        LOGGER.exception("Failed to render DeepSeek reading-order overlay for %s", doc.image_path)
+        return None
+    if success:
+        return output_path
+    return None
+
+
+def _extract_deepseek_reference_boxes(markdown: str) -> List[tuple[str, tuple[float, float, float, float]]]:
+    if "<|ref|>" not in markdown or "<|det|>" not in markdown:
+        return []
+    entries: List[tuple[str, tuple[float, float, float, float]]] = []
+    idx = 0
+    length = len(markdown)
+    ref_start_token = "<|ref|>"
+    ref_end_token = "<|/ref|>"
+    det_start_token = "<|det|>"
+    while idx < length:
+        start = markdown.find(ref_start_token, idx)
+        if start == -1:
+            break
+        end = markdown.find(ref_end_token, start)
+        if end == -1:
+            break
+        label = markdown[start + len(ref_start_token):end].strip().lower()
+        det_start = markdown.find(det_start_token, end)
+        if det_start == -1:
+            idx = end + len(ref_end_token)
+            continue
+        coord_start = det_start + len(det_start_token)
+        coord_end = _find_deepseek_bracket_end(markdown, coord_start)
+        if coord_end == -1:
+            idx = coord_start
+            continue
+        raw_coords = markdown[coord_start:coord_end]
+        idx = coord_end
+        boxes = _coerce_deepseek_boxes(raw_coords)
+        for box in boxes:
+            entries.append(((label or "text"), box))
+    return entries
+
+
+def _load_deepseek_reference_file(refs_path: Path) -> List[tuple[str, tuple[float, float, float, float]]]:
+    try:
+        payload = json.loads(refs_path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+    boxes: List[tuple[str, tuple[float, float, float, float]]] = []
+    if isinstance(payload, list):
+        for entry in payload:
+            raw_boxes: object | None = None
+            label = ""
+            if isinstance(entry, dict):
+                raw_boxes = entry.get("boxes")
+                label = str(entry.get("label", "")).lower()
+            else:
+                raw_boxes = entry
+            if raw_boxes is None:
+                continue
+            for box in _coerce_deepseek_boxes(raw_boxes):
+                boxes.append((label, box))
+    return boxes
+
+
+def _find_deepseek_bracket_end(text: str, start: int) -> int:
+    length = len(text)
+    idx = start
+    while idx < length and text[idx].isspace():
+        idx += 1
+    if idx >= length or text[idx] != "[":
+        return -1
+    depth = 0
+    while idx < length:
+        char = text[idx]
+        if char == "[":
+            depth += 1
+        elif char == "]":
+            depth -= 1
+            if depth == 0:
+                return idx + 1
+        idx += 1
+    return -1
+
+
+def _coerce_deepseek_boxes(payload: object) -> List[tuple[float, float, float, float]]:
+    if isinstance(payload, str):
+        try:
+            data = ast.literal_eval(payload.strip())
+        except Exception:
+            return []
+    else:
+        data = payload
+    boxes: List[tuple[float, float, float, float]] = []
+
+    def _walk(node: Any) -> None:
+        if isinstance(node, (list, tuple)):
+            if len(node) == 4 and all(isinstance(val, (int, float)) for val in node):
+                boxes.append(tuple(float(val) for val in node))
+            else:
+                for child in node:
+                    _walk(child)
+
+    _walk(data)
+    return boxes
+
+
+def _extract_boxes_from_bounding_bitmap(
+    image_path: Optional[Path],
+    original_path: Optional[Path] = None,
+) -> List[tuple[float, float, float, float]]:
+    if image_path is None or not image_path.exists():
+        return []
+    try:
+        boxed_image = Image.open(image_path).convert("RGB")
+    except Exception:
+        LOGGER.exception("Failed to open DeepSeek bounding image for fallback box extraction: %s", image_path)
+        return []
+
+    width, height = boxed_image.size
+    if width <= 0 or height <= 0:
+        boxed_image.close()
+        return []
+
+    boxed_array = np.asarray(boxed_image, dtype=np.int16)
+    boxed_image.close()
+
+    mask: Optional[np.ndarray] = None
+    if original_path and original_path.exists():
+        try:
+            original_image = Image.open(original_path).convert("RGB")
+            if original_image.size != (width, height):
+                original_image = original_image.resize((width, height), Image.BILINEAR)
+            original_array = np.asarray(original_image, dtype=np.int16)
+            original_image.close()
+            diff = np.abs(boxed_array - original_array).max(axis=2)
+            adaptive_threshold = max(5, int(np.percentile(diff, 65)))
+            mask = diff >= adaptive_threshold
+        except Exception:
+            LOGGER.exception("Failed to compare DeepSeek overlay against original image: %s", original_path)
+            mask = None
+
+    if mask is None:
+        diff = boxed_array.max(axis=2) - boxed_array.min(axis=2)
+        brightness = boxed_array.mean(axis=2)
+        mask = (diff >= 24) & (brightness >= 35)
+
+    if not np.any(mask):
+        return []
+
+    # Dilate mask slightly to merge fragmented rectangles
+    for _ in range(2):
+        expanded = mask.copy()
+        expanded[1:, :] |= mask[:-1, :]
+        expanded[:-1, :] |= mask[1:, :]
+        expanded[:, 1:] |= mask[:, :-1]
+        expanded[:, :-1] |= mask[:, 1:]
+        expanded[1:, 1:] |= mask[:-1, :-1]
+        expanded[:-1, :-1] |= mask[1:, 1:]
+        expanded[1:, :-1] |= mask[:-1, 1:]
+        expanded[:-1, 1:] |= mask[1:, :-1]
+        mask = expanded
+
+    h, w = mask.shape
+    visited = np.zeros((h, w), dtype=bool)
+    components: List[tuple[int, int, int, int, int]] = []
+    min_pixels = max(24, (w * h) // 400_000)
+    min_area = max(80, (w * h) // 250_000)
+    max_area = int(w * h * 0.95)
+
+    for y in range(h):
+        row_mask = mask[y]
+        if not row_mask.any():
+            continue
+        for x in range(w):
+            if not row_mask[x] or visited[y, x]:
+                continue
+            stack = [(y, x)]
+            visited[y, x] = True
+            min_x = max_x = x
+            min_y = max_y = y
+            count = 0
+            while stack:
+                cy, cx = stack.pop()
+                count += 1
+                if cx < min_x:
+                    min_x = cx
+                if cx > max_x:
+                    max_x = cx
+                if cy < min_y:
+                    min_y = cy
+                if cy > max_y:
+                    max_y = cy
+                for ny in range(max(0, cy - 1), min(h, cy + 2)):
+                    row_n = mask[ny]
+                    visited_row = visited[ny]
+                    for nx in range(max(0, cx - 1), min(w, cx + 2)):
+                        if visited_row[nx] or not row_n[nx]:
+                            continue
+                        visited_row[nx] = True
+                        stack.append((ny, nx))
+            area = (max_x - min_x + 1) * (max_y - min_y + 1)
+            if count < min_pixels or area < min_area or area > max_area:
+                continue
+            components.append((min_x, min_y, max_x, max_y, count))
+
+    if not components:
+        return []
+
+    components.sort(key=lambda box: ((box[1] + box[3]) / 2.0, (box[0] + box[2]) / 2.0))
+
+    # Merge overlapping boxes that are very close vertically to avoid duplicate rows.
+    merged: List[tuple[int, int, int, int, int]] = []
+    vertical_merge_margin = max(4, int(height * 0.01))
+    for box in components:
+        if not merged:
+            merged.append(box)
+            continue
+        prev = merged[-1]
+        prev_center = (prev[1] + prev[3]) / 2.0
+        curr_center = (box[1] + box[3]) / 2.0
+        if abs(curr_center - prev_center) <= vertical_merge_margin:
+            merged[-1] = (
+                min(prev[0], box[0]),
+                min(prev[1], box[1]),
+                max(prev[2], box[2]),
+                max(prev[3], box[3]),
+                prev[4] + box[4],
+            )
+        else:
+            merged.append(box)
+
+    if len(merged) > _MAX_COLOR_COMPONENTS:
+        merged = merged[:_MAX_COLOR_COMPONENTS]
+
+    scale_x = 999.0 / max(width - 1, 1)
+    scale_y = 999.0 / max(height - 1, 1)
+    normalized: List[tuple[float, float, float, float]] = []
+    for x1, y1, x2, y2, _ in merged:
+        normalized.append(
+            (
+                max(0.0, min(999.0, x1 * scale_x)),
+                max(0.0, min(999.0, y1 * scale_y)),
+                max(0.0, min(999.0, x2 * scale_x)),
+                max(0.0, min(999.0, y2 * scale_y)),
+            )
+        )
+
+    return normalized
+
+
+def _scale_deepseek_box(box: tuple[float, float, float, float], width: int, height: int) -> Optional[tuple[int, int, int, int]]:
+    if width <= 0 or height <= 0:
+        return None
+    try:
+        x1, y1, x2, y2 = [float(value) for value in box]
+    except Exception:
+        return None
+
+    def _clamp(value: float) -> float:
+        return max(0.0, min(999.0, value))
+
+    x1 = _clamp(x1)
+    y1 = _clamp(y1)
+    x2 = _clamp(x2)
+    y2 = _clamp(y2)
+    if x2 < x1:
+        x1, x2 = x2, x1
+    if y2 < y1:
+        y1, y2 = y2, y1
+
+    px1 = int(round((x1 / 999.0) * width))
+    py1 = int(round((y1 / 999.0) * height))
+    px2 = int(round((x2 / 999.0) * width))
+    py2 = int(round((y2 / 999.0) * height))
+    if px1 == px2 and py1 == py2:
+        return None
+    return (px1, py1, px2, py2)
+
+
+def _draw_deepseek_reading_order_overlay(
+    source_path: Path,
+    boxes: Sequence[tuple[float, float, float, float]],
+    output_path: Path,
+) -> bool:
+    try:
+        with Image.open(source_path) as base_image:
+            base = base_image.convert("RGB")
+    except Exception:
+        LOGGER.exception("Failed to open DeepSeek bounding image for reading-order overlay: %s", source_path)
+        return False
+
+    width, height = base.size
+    scaled_boxes: List[tuple[int, int, int, int]] = []
+    for box in boxes:
+        scaled = _scale_deepseek_box(box, width, height)
+        if scaled is not None:
+            scaled_boxes.append(scaled)
+
+    if not scaled_boxes:
+        return False
+
+    centers = [((x1 + x2) / 2, (y1 + y2) / 2) for x1, y1, x2, y2 in scaled_boxes]
+    draw = ImageDraw.Draw(base)
+    color = (255, 59, 59)
+    min_dim = max(1, min(width, height))
+    line_width = max(2, round(min_dim * 0.004))
+    radius = max(4, round(min_dim * 0.012))
+
+    for index in range(1, len(centers)):
+        draw.line([centers[index - 1], centers[index]], fill=color, width=line_width)
+
+    try:
+        font_size = max(12, round(min_dim * 0.025))
+        font = ImageFont.truetype("DejaVuSans.ttf", font_size)
+    except Exception:
+        font = ImageFont.load_default()
+
+    outline_width = max(1, line_width - 1)
+    for order, (cx, cy) in enumerate(centers, start=1):
+        circle = [cx - radius, cy - radius, cx + radius, cy + radius]
+        draw.ellipse(circle, fill=(255, 255, 255, 230), outline=color, width=outline_width)
+        label = str(order)
+        try:
+            bbox = draw.textbbox((0, 0), label, font=font)
+            text_w = bbox[2] - bbox[0]
+            text_h = bbox[3] - bbox[1]
+        except Exception:
+            text_w, text_h = font.getsize(label)
+        text_pos = (cx - text_w / 2, cy - text_h / 2)
+        draw.text(text_pos, label, fill=color, font=font)
+
+    base.save(output_path)
+    return True
 
 
 def _run_quantized_deepseek_variant(
@@ -869,6 +1394,7 @@ def _run_quantized_deepseek_variant(
     image_size: int,
     crop_mode: bool,
     attn_impl: str,
+    export_reading_order: bool = False,
 ) -> OCRVariantArtifacts:
     results = run_ocr_documents(
         input_paths,
@@ -895,6 +1421,8 @@ def _run_quantized_deepseek_variant(
     bounding_path: Optional[Path] = None
     bounding_paths: List[Path] = []
     preview_image: Optional[Path] = None
+    layout_path: Optional[Path] = None
+    layout_paths: List[Path] = []
 
     for doc in results:
         if doc.text_markdown:
@@ -913,6 +1441,13 @@ def _run_quantized_deepseek_variant(
                     preview_image = candidate_path
                 bounding_paths.append(candidate_path)
                 break
+
+        if export_reading_order:
+            layout_candidate = _generate_deepseek_reading_order_image(doc, page_bounding)
+            if layout_candidate:
+                layout_paths.append(layout_candidate)
+                if layout_path is None:
+                    layout_path = layout_candidate
 
         images_dir = doc.artifact_dir / "images"
         if images_dir.exists():
@@ -939,6 +1474,7 @@ def _run_quantized_deepseek_variant(
         "quantized": True,
         "model_repo": QUANTIZED_MODEL_NAME,
         "documents": len(results),
+        "reading_order": export_reading_order,
     }
 
     return OCRVariantArtifacts(
@@ -950,6 +1486,8 @@ def _run_quantized_deepseek_variant(
         text_path=combined_text_path,
         bounding_image=bounding_path,
         bounding_images=bounding_paths,
+        layout_image=layout_path,
+        layout_images=layout_paths,
         crop_images=crop_paths,
         preview_text=preview_text,
         preview_image=preview_image,
@@ -980,6 +1518,9 @@ def _run_yomitoku_variant(
     export_reading_order: bool = False,
     device: str = "cuda",
     model_key: str = "yomitoku",
+    reading_order_mode: str = YOMITOKU_READING_ORDER_DEFAULT,
+    lite_mode: bool = False,
+    ignore_line_break: bool = True,
 ) -> OCRVariantArtifacts:
     """Run YomiToku OCR variant.
 
@@ -995,7 +1536,7 @@ def _run_yomitoku_variant(
         OCRVariantArtifacts containing results and output paths.
     """
     _require_cv2()
-    analyzer = _get_yomitoku_analyzer(device)
+    analyzer = _get_yomitoku_analyzer(device, reading_order_mode, lite_mode)
 
     work_dir.mkdir(parents=True, exist_ok=True)
     artifact_root = work_dir / "artifacts"
@@ -1032,6 +1573,7 @@ def _run_yomitoku_variant(
                 img=image,
                 figure_dir=str(figures_dir),
                 export_figure_letter=export_figure_letter,
+                ignore_line_break=ignore_line_break,
             )
             markdown_text = _rewrite_yomitoku_markdown_links(markdown_text, figures_dir)
             normalized_markdown = markdown_text.strip()
@@ -1100,6 +1642,9 @@ def _run_yomitoku_variant(
         "figure_letter": export_figure_letter,
         "reading_order": export_reading_order,
         "word_fallback_used": used_word_fallback,
+        "reading_order_mode": reading_order_mode,
+        "lite": lite_mode,
+        "ignore_line_break": ignore_line_break,
     }
 
     return OCRVariantArtifacts(
@@ -1267,6 +1812,12 @@ def run_ocr_uploads(
             try:
                 start_time = time.perf_counter()
                 if key == "deepseek":
+                    deepseek_options: Any = options_by_model.get(key) if isinstance(options_by_model, Mapping) else None
+                    export_reading_order = False
+                    if isinstance(deepseek_options, Mapping):
+                        export_reading_order = bool(deepseek_options.get("reading_order"))
+                    elif isinstance(deepseek_options, bool):
+                        export_reading_order = deepseek_options
                     variant = _run_deepseek_variant(
                         processed_images,
                         work_dir,
@@ -1276,8 +1827,15 @@ def run_ocr_uploads(
                         image_size=image_size,
                         crop_mode=crop_mode,
                         attn_impl=attn_impl,
+                        export_reading_order=export_reading_order,
                     )
                 elif key == "deepseek-4bit":
+                    deepseek_options: Any = options_by_model.get(key) if isinstance(options_by_model, Mapping) else None
+                    export_reading_order = False
+                    if isinstance(deepseek_options, Mapping):
+                        export_reading_order = bool(deepseek_options.get("reading_order"))
+                    elif isinstance(deepseek_options, bool):
+                        export_reading_order = deepseek_options
                     variant = _run_quantized_deepseek_variant(
                         processed_images,
                         work_dir,
@@ -1286,6 +1844,7 @@ def run_ocr_uploads(
                         image_size=image_size,
                         crop_mode=crop_mode,
                         attn_impl=attn_impl,
+                        export_reading_order=export_reading_order,
                     )
                 elif key in ("yomitoku", "yomitoku-cpu"):
                     # Determine device based on model key
@@ -1300,9 +1859,18 @@ def run_ocr_uploads(
 
                     export_figure_letter = False
                     export_reading_order = False
+                    reading_order_mode = YOMITOKU_READING_ORDER_DEFAULT
+                    lite_mode = False
+                    ignore_line_break = True
                     if isinstance(yomitoku_options, Mapping):
                         export_figure_letter = bool(yomitoku_options.get("figure_letter"))
                         export_reading_order = bool(yomitoku_options.get("reading_order"))
+                        reading_order_mode = _normalize_yomitoku_reading_order(
+                            yomitoku_options.get("reading_order_mode")
+                        )
+                        lite_mode = bool(yomitoku_options.get("lite"))
+                        if "ignore_line_break" in yomitoku_options:
+                            ignore_line_break = bool(yomitoku_options.get("ignore_line_break"))
                     elif isinstance(yomitoku_options, bool):
                         export_figure_letter = yomitoku_options
 
@@ -1313,6 +1881,9 @@ def run_ocr_uploads(
                         export_reading_order=export_reading_order,
                         device=device,
                         model_key=key,
+                        reading_order_mode=reading_order_mode,
+                        lite_mode=lite_mode,
+                        ignore_line_break=ignore_line_break,
                     )
                 else:
                     raise ValueError(f"Unsupported OCR model '{key}'")

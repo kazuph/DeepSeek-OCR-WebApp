@@ -19,9 +19,6 @@ const historyListEl = document.getElementById('history-list');
 const iconSpriteContainer = document.getElementById('icon-sprite');
 const inputPreviewSection = document.getElementById('input-preview-section');
 const inputPreviewGrid = document.getElementById('input-preview-grid');
-const promptInput = document.getElementById('prompt-input');
-const promptResetBtn = document.getElementById('prompt-reset');
-const defaultPrompt = promptInput?.defaultValue || '';
 const progressWrapper = document.getElementById('progress-wrapper');
 const progressBar = document.getElementById('progress-bar');
 const MODEL_PRIORITIES = {
@@ -44,8 +41,29 @@ const MODEL_STATUS_CLASSES = {
 
 const MODEL_SELECTION_STORAGE_KEY = 'ocr.selectedModels';
 const MODEL_OPTIONS_STORAGE_KEY = 'ocr.modelOptions';
+const PROMPT_STORAGE_KEY = 'ocr.deepseekPrompt';
+const HIDDEN_MODEL_KEYS = new Set(['yomitoku-cpu', 'deepseek-4bit']);
+const YOMITOKU_MODEL_KEYS = new Set(['yomitoku', 'yomitoku-cpu']);
+const YOMITOKU_READING_ORDER_MODES = [
+  { value: 'auto', label: 'AUTO' },
+  { value: 'left2right', label: '横書き' },
+  { value: 'right2left', label: '縦書き' },
+];
+const YOMITOKU_READING_ORDER_VALUES = new Set(
+  ['auto', 'top2bottom', 'left2right', 'right2left'],
+);
+const PROMPT_PRESET_OPTIONS = [
+  { key: 'document', label: 'ドキュメント' },
+  { key: 'pictureBook', label: '絵本' },
+];
+const PROMPT_PRESETS = {
+  document: '<image>\n<|grounding|>Convert the document to markdown.',
+  pictureBook: '<image>\n<|grounding|>Convert the picture book to markdown by extracting only the text from each panel exactly as written.',
+};
 
 const modelTimerHandles = new Map();
+let deepseekPromptTextarea = null;
+let deepseekPromptState = loadPromptState();
 
 function buildPlaceholderDataUrl(label) {
   const safeLabel = (label || '').toUpperCase().replace(/[^A-Z0-9+]/g, '').slice(0, 6) || 'FILE';
@@ -354,6 +372,10 @@ function ensureModelOptionDefaults() {
     const current = { ...(modelOptionSelections.get(model.key) || {}) };
     if (!Array.isArray(model.options) || !model.options.length) {
       modelOptionSelections.set(model.key, current);
+      if (YOMITOKU_MODEL_KEYS.has(model.key) && !YOMITOKU_READING_ORDER_VALUES.has(current.reading_order_mode)) {
+        current.reading_order_mode = 'auto';
+        modelOptionSelections.set(model.key, current);
+      }
       return;
     }
     model.options.forEach((option) => {
@@ -364,6 +386,12 @@ function ensureModelOptionDefaults() {
         current[option.key] = !!option.default;
       }
     });
+    if (YOMITOKU_MODEL_KEYS.has(model.key)) {
+      const storedMode = current.reading_order_mode;
+      if (typeof storedMode !== 'string' || !YOMITOKU_READING_ORDER_VALUES.has(storedMode)) {
+        current.reading_order_mode = 'auto';
+      }
+    }
     modelOptionSelections.set(model.key, current);
   });
 
@@ -385,20 +413,160 @@ function setModelOptionValue(modelKey, optionKey, value) {
   persistModelOptions();
 }
 
+function getReadingOrderMode(modelKey) {
+  const options = modelOptionSelections.get(modelKey) || {};
+  const value = options.reading_order_mode;
+  if (typeof value === 'string' && YOMITOKU_READING_ORDER_VALUES.has(value)) {
+    return value;
+  }
+  return 'auto';
+}
+
+function setReadingOrderMode(modelKey, value) {
+  const normalized = YOMITOKU_READING_ORDER_VALUES.has(value) ? value : 'auto';
+  const options = { ...(modelOptionSelections.get(modelKey) || {}) };
+  options.reading_order_mode = normalized;
+  modelOptionSelections.set(modelKey, options);
+  persistModelOptions();
+}
+
+function loadPromptState() {
+  try {
+    const raw = localStorage.getItem(PROMPT_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      const preset = PROMPT_PRESETS[parsed?.preset] ? parsed.preset : 'document';
+      const value = typeof parsed?.value === 'string' && parsed.value.trim()
+        ? parsed.value
+        : PROMPT_PRESETS[preset];
+      return { preset, value };
+    }
+  } catch (error) {
+    console.warn('prompt state load failed', error);
+  }
+  return { preset: 'document', value: PROMPT_PRESETS.document };
+}
+
+function persistPromptState() {
+  try {
+    localStorage.setItem(PROMPT_STORAGE_KEY, JSON.stringify(deepseekPromptState));
+  } catch (error) {
+    console.debug('prompt state persist failed', error);
+  }
+}
+
+function applyPromptPreset(preset) {
+  const normalized = PROMPT_PRESETS[preset] ? preset : 'document';
+  deepseekPromptState = {
+    preset: normalized,
+    value: PROMPT_PRESETS[normalized],
+  };
+  if (deepseekPromptTextarea) {
+    deepseekPromptTextarea.value = deepseekPromptState.value;
+  }
+  syncPromptRadios();
+  persistPromptState();
+}
+
+function updatePromptValue(value) {
+  deepseekPromptState = {
+    ...deepseekPromptState,
+    value,
+  };
+  persistPromptState();
+}
+
+function getPromptForModel(modelKey) {
+  if (modelKey === 'deepseek') {
+    return (deepseekPromptState.value || '').trim();
+  }
+  return '';
+}
+
+function renderDeepseekPromptControls(container) {
+  const card = document.createElement('div');
+  card.className = 'prompt-card';
+
+  const header = document.createElement('div');
+  header.className = 'prompt-card-header';
+  header.textContent = 'OCRプロンプト';
+  card.appendChild(header);
+
+  const radios = document.createElement('div');
+  radios.className = 'prompt-radio-group';
+  PROMPT_PRESET_OPTIONS.forEach((preset) => {
+    const label = document.createElement('label');
+    const input = document.createElement('input');
+    input.type = 'radio';
+    input.name = 'deepseek-prompt-preset';
+    input.value = preset.key;
+    input.checked = deepseekPromptState.preset === preset.key;
+    input.addEventListener('change', () => {
+      if (input.checked) {
+        applyPromptPreset(preset.key);
+        syncPromptTextarea();
+      }
+    });
+    const text = document.createElement('span');
+    text.textContent = preset.label;
+    label.append(input, text);
+    radios.appendChild(label);
+  });
+  card.appendChild(radios);
+
+  const textarea = document.createElement('textarea');
+  textarea.className = 'prompt-textarea';
+  textarea.rows = 5;
+  textarea.value = deepseekPromptState.value;
+  textarea.addEventListener('input', () => {
+    updatePromptValue(textarea.value);
+  });
+  card.appendChild(textarea);
+  deepseekPromptTextarea = textarea;
+
+  const actions = document.createElement('div');
+  actions.className = 'prompt-actions-inline';
+  const resetBtn = document.createElement('button');
+  resetBtn.type = 'button';
+  resetBtn.className = 'button secondary mini';
+  resetBtn.textContent = 'プリセットに戻す';
+  resetBtn.addEventListener('click', () => {
+    applyPromptPreset(deepseekPromptState.preset);
+    syncPromptTextarea();
+  });
+  actions.appendChild(resetBtn);
+  card.appendChild(actions);
+
+  container.appendChild(card);
+  syncPromptRadios();
+}
+
+function syncPromptTextarea() {
+  if (deepseekPromptTextarea) {
+    deepseekPromptTextarea.value = deepseekPromptState.value;
+  }
+}
+
+function syncPromptRadios() {
+  document.querySelectorAll('input[name="deepseek-prompt-preset"]').forEach((input) => {
+    input.checked = input.value === deepseekPromptState.preset;
+  });
+}
+
 function buildModelOptionPayload(modelKey) {
   const options = modelOptionSelections.get(modelKey);
   if (!options || typeof options !== 'object') {
     return null;
   }
   const normalized = {};
-  let hasValue = false;
   Object.entries(options).forEach(([key, value]) => {
     if (typeof value === 'boolean') {
       normalized[key] = value;
-      hasValue = true;
+    } else if (typeof value === 'string' && value) {
+      normalized[key] = value;
     }
   });
-  if (!hasValue) {
+  if (!Object.keys(normalized).length) {
     return null;
   }
   return { [modelKey]: normalized };
@@ -410,6 +578,7 @@ function renderModelOptions() {
   }
 
   modelOptionsEl.innerHTML = '';
+  deepseekPromptTextarea = null;
   const fragment = document.createDocumentFragment();
 
   if (!availableModels.length) {
@@ -512,6 +681,51 @@ function renderModelOptions() {
         optLabel.append(optCheckbox, optBody);
         settings.appendChild(optLabel);
       });
+
+      if (YOMITOKU_MODEL_KEYS.has(model.key)) {
+        const modeGroup = document.createElement('div');
+        modeGroup.className = 'model-suboption reading-order-group';
+
+        const modeBody = document.createElement('div');
+        modeBody.className = 'model-suboption-body reading-order-body';
+
+        const modeLabel = document.createElement('span');
+        modeLabel.className = 'model-suboption-label';
+        modeLabel.textContent = '読み取り順';
+        modeBody.appendChild(modeLabel);
+
+        const radios = document.createElement('div');
+        radios.className = 'reading-order-options';
+        const currentMode = getReadingOrderMode(model.key);
+        YOMITOKU_READING_ORDER_MODES.forEach((mode) => {
+          const radioLabel = document.createElement('label');
+          radioLabel.className = 'reading-order-option';
+
+          const radio = document.createElement('input');
+          radio.type = 'radio';
+          radio.name = `reading-order-${model.key}`;
+          radio.value = mode.value;
+          radio.checked = currentMode === mode.value;
+          radio.addEventListener('change', () => {
+            if (radio.checked) {
+              setReadingOrderMode(model.key, mode.value);
+            }
+          });
+
+          const text = document.createElement('span');
+          text.textContent = mode.label;
+          radioLabel.append(radio, text);
+          radios.appendChild(radioLabel);
+        });
+
+        modeBody.appendChild(radios);
+        modeGroup.appendChild(modeBody);
+        settings.appendChild(modeGroup);
+      }
+
+      if (model.key === 'deepseek') {
+        renderDeepseekPromptControls(settings);
+      }
       option.appendChild(settings);
     }
 
@@ -585,7 +799,9 @@ function loadStoredModelSelection() {
     if (stored) {
       const parsed = JSON.parse(stored);
       if (Array.isArray(parsed) && parsed.length) {
-        selectedModels = new Set(parsed);
+        selectedModels = new Set(
+          parsed.filter((key) => key && !HIDDEN_MODEL_KEYS.has(key))
+        );
       }
     }
   } catch (error) {
@@ -633,15 +849,22 @@ async function fetchModels() {
           },
         ],
       },
-      { key: 'deepseek', label: 'DeepSeek OCR', description: '', options: [] },
       {
-        key: 'deepseek-4bit',
-        label: 'DeepSeek OCR (4-bit Quantized)',
-        description: 'BitsAndBytes 4-bit build (CUDA GPU required).',
-        options: [],
+        key: 'deepseek',
+        label: 'DeepSeek OCR',
+        description: '',
+        options: [
+          {
+            key: 'reading_order',
+            label: '読み順序を表示',
+            description: 'バウンディング画像に読み順序の赤線を重ねます。',
+          },
+        ],
       },
     ];
   }
+
+  models = models.filter((model) => model && !HIDDEN_MODEL_KEYS.has(model.key));
 
   models.sort((a, b) => {
     const aPriority = MODEL_PRIORITIES[a.key] ?? 99;
@@ -2116,6 +2339,14 @@ function ensureVariantObject(source, fallbackKey) {
   );
   const resolvedBoundingUrl = boundingUrlSource || (boundingImages.length ? boundingImages[0].url : null);
 
+  const layoutUrlSource = source?.layout_image_url || source?.layoutUrl || null;
+  const layoutImages = normalizeLayoutImages(
+    source?.layout_images || source?.layoutImages,
+    layoutUrlSource,
+    label
+  );
+  const resolvedLayoutUrl = layoutUrlSource || (layoutImages.length ? layoutImages[0].url : null);
+
   const variant = {
     model: modelKey,
     label,
@@ -2123,6 +2354,8 @@ function ensureVariantObject(source, fallbackKey) {
     text_markdown: source?.text_markdown || source?.textMarkdown || '',
     bounding_image_url: resolvedBoundingUrl,
     bounding_images: boundingImages,
+    layout_image_url: resolvedLayoutUrl,
+    layout_images: layoutImages,
     crops: Array.isArray(source?.crops) ? source.crops : [],
     preview_image_url: source?.preview_image_url || source?.previewUrl || null,
     preview: source?.preview || '',
@@ -2513,12 +2746,13 @@ function loadIcons() {
     .catch((err) => console.error('Failed to load icons', err));
 }
 
-async function uploadModelVariant(item, modelKey, promptValue) {
+async function uploadModelVariant(item, modelKey) {
   const label = labelForModel(modelKey);
   const formData = new FormData();
   (item.files || []).forEach((file) => {
     formData.append('files', file);
   });
+  const promptValue = getPromptForModel(modelKey);
   if (promptValue) {
     formData.append('prompt', promptValue);
   }
@@ -2581,11 +2815,10 @@ async function uploadFile(item) {
   resetActiveAggregate(item.name);
   resetModelStatuses(models);
 
-  const promptValue = promptInput?.value?.trim() || '';
   let overallSuccess = true;
 
   for (const modelKey of models) {
-    const success = await uploadModelVariant(item, modelKey, promptValue);
+    const success = await uploadModelVariant(item, modelKey);
     if (!success) {
       overallSuccess = false;
     }
@@ -2747,10 +2980,3 @@ pingServer();
 updateQueueStatus();
 fetchHistory();
 loadIcons();
-
-if (promptResetBtn && promptInput) {
-  promptResetBtn.addEventListener('click', () => {
-    promptInput.value = defaultPrompt;
-    setStatus('プロンプトを既定に戻しました。');
-  });
-}

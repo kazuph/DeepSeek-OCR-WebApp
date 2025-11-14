@@ -29,6 +29,8 @@
 - CUDA GPU 環境で `pip install -U bitsandbytes accelerate` を行うと、`Jalea96/DeepSeek-OCR-bnb-4bit-NF4`（BitsAndBytes 4-bit 量子化版）も選択肢に追加され、3 モデル併用による比較が可能です。
 - 画面上部の「使用モデル」で各チェックボックスを切り替えると、選択したモデルのみで推論を行います。複数選択時はテキスト / 切り出し画像 / バウンディング画像がモデル単位で並列表示されます。
 - 解析結果や履歴はモデル別に保存されるため、履歴からは各モデルを個別に再確認できます。
+- YomiToku の設定カードには「Lite モード」「改行を無視」のチェックボックスと、「読み取り順」ラジオ（AUTO / 横書き / 縦書き）があり、UI から各オプションを切り替えられます。
+- DeepSeek の設定カード内に OCR プロンプト欄を移動し、ドキュメント用／絵本用のプリセットをラジオボタンで切り替えられるようにしました。
 - 手動の確認手順は [docs/manual_test_plan.md](docs/manual_test_plan.md) にまとめています。
 
 ## REST API
@@ -83,9 +85,59 @@ curl -X POST \
   http://<host>:8080/api/ocr | jq
 ```
 
+読み取り順を縦書き用に固定したい場合:
+
+```bash
+curl -X POST \
+  -F "file=@tests/fixtures/doc.png" \
+  -F "models=yomitoku" \
+  -F 'model_options={"yomitoku":{"reading_order_mode":"right2left"}}' \
+  http://<host>:8080/api/ocr | jq
+```
+
+#### 絵本向けプリセット例
+
+絵本やコマ割りされたストーリーパネルでは、横並びの吹き出しや短文が多いため以下の設定を推奨します。
+
+- **YomiToku**: `ignore_line_break=true` で行内スラッシュを抑止し、`reading_order_mode=left2right` でコマの読み順を優先的に左→右へ並べ替え。必要に応じて `lite=true` をオンにすると軽量モデルを使って高速化できます。
+
+```bash
+curl -X POST \
+  -F "file=@tests/fixtures/picture_book_page.png" \
+  -F "models=yomitoku" \
+  -F 'model_options={"yomitoku":{"ignore_line_break":true,"reading_order_mode":"left2right","lite":true}}' \
+  http://<host>:8080/api/ocr | jq
+```
+
+- **DeepSeek**: 絵本専用プロンプトを使うと、各パネルのテキストだけを順番に Markdown 化しやすくなります。
+
+```bash
+curl -X POST \
+  -F "file=@tests/fixtures/picture_book_page.png" \
+  -F "models=deepseek" \
+  -F $'prompt=<image>\n<|grounding|>Convert the picture book to markdown by extracting only the text from each panel exactly as written.' \
+  http://<host>:8080/api/ocr | jq
+```
+
+DeepSeek 系モデルで読み順序の赤線を描画したい場合は次のように指定します：
+
+```bash
+curl -X POST \
+  -F "file=@tests/fixtures/doc.png" \
+  -F "models=deepseek" \
+  -F 'model_options={"deepseek":{"reading_order":true}}' \
+  http://<host>:8080/api/ocr | jq
+```
+
 利用可能なオプションは `/api/models` エンドポイントで確認できます：
-- **yomitoku**:
+- **yomitoku / yomitoku-cpu**:
   - `figure_letter` (boolean): 絵や図の中の文字も抽出。YomiToku の `--figure_letter` オプション相当。ページ全体を図として検出してしまう絵本・縦書き原稿向け。
+  - `reading_order_mode` (string): 読み取り順のヒント。`auto`（既定）、`left2right`（横書き）、`right2left`（縦書き）、`top2bottom`（段組み優先）を指定できます。
+  - `reading_order` (boolean): レイアウト解析画像に読み順序の番号を描画します。
+  - `lite` (boolean): 軽量 OCR モデル（parseq-tiny）を使用して高速化します。
+  - `ignore_line_break` (boolean, default true): 出力内の段落改行を削除してスラッシュを挿入しないようにします。
+- **deepseek / deepseek-4bit**:
+  - `reading_order` (boolean): DeepSeek のバウンディング画像に `<IMAGE>/<TXT>` の順番を赤線と番号で重ねて保存します。
 
 #### `/api/history` と `/api/history/{id}`
 
@@ -109,6 +161,20 @@ curl -o crop.png \
 # 元の入力画像を取得
 curl -o original.png \
   http://<host>:8080/api/history/20251029021741-1fb89c21/image/input/image.png
+
+# バウンディング画像（複数ページがある場合は path を指定）
+curl -o bbox.jpg \
+  "http://<host>:8080/api/history/20251029021741-1fb89c21/image/bounding/artifacts/test2/result_with_boxes.jpg?model=deepseek"
+
+# レイアウト可視化（YomiToku の読み順画像など）
+curl -o layout.jpg \
+  "http://<host>:8080/api/history/20251029021741-1fb89c21/image/layout/artifacts/test2_page01_layout.jpg?model=yomitoku"
+
+# レスポンス内の URL をそのまま使う場合
+curl -L -o crop2.jpg \
+  "http://<host>:8080/api/history/20251029021741-1fb89c21/image/crop/artifacts/images/1.jpg?model=deepseek"
+
+> **メモ**: `/api/ocr` のレスポンスや `/api/history/{id}` の `variants[*].bounding_images[]` / `layout_images[]` / `crops[]` には、上記エンドポイントへアクセス済みの完全 URL も含まれます。そのまま `curl -L` でダウンロードできるので、任意の画像を API だけで取得可能です。
 ```
 
 ### 外部公開時の注意
