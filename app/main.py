@@ -80,6 +80,25 @@ async def ping() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/api/health")
+async def health() -> dict[str, object]:
+    try:
+        history_entries = list_history_entries()
+    except Exception:
+        history_entries = []
+    return {
+        "status": "ok",
+        "models": [
+            {
+                "key": descriptor.key,
+                "label": descriptor.label,
+            }
+            for descriptor in MODEL_DESCRIPTORS
+        ],
+        "history_count": len(history_entries),
+    }
+
+
 @app.get("/api/models")
 async def models_list() -> List[dict[str, object]]:
     return [
