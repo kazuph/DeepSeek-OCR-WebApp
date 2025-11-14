@@ -1,0 +1,54 @@
+DeepSeek-OCR AI README (updated 2025-11-14)
+==========================================
+
+Purpose
+-------
+This service exposes a FastAPI backend at http://localhost:8080 that performs OCR using YomiToku (GPU/CPU) and DeepSeek models. This document summarizes the contract for automated clients such as LLM-powered agents.
+
+Service Map
+-----------
+1. GET /api/ping → {"status": "ok"} for readiness checks.
+2. GET /api/models → Enumerates available model descriptors and options. Keys include "yomitoku" (GPU) and "yomitoku-cpu". Each option lists the client-facing flag names used in /api/ocr.
+3. POST /api/ocr → Primary OCR endpoint. Accepts multipart/form-data with one or more file parts (use field name "files" for batches or "file" for single uploads). Optional form fields:
+   - prompt: Free-form instruction string for downstream LLM summaries.
+   - models: Comma-separated model keys if you need non-default variants.
+   - history_id: Resume processing using a prior history artifact.
+   - model_options: JSON object encoded as a string; keys correspond to those returned by /api/models (e.g., {"figure_letter": true}).
+4. GET /api/history → Latest processed entries including preview metadata.
+5. GET /api/history/{id} → Full record for a prior run (markdown/plain text, artifact paths, options used).
+6. DELETE /api/history/{id} → Remove a stored run and its artifacts.
+7. GET /api/history/{id}/image/bounding or /image/layout → Serve bounding-box and layout renders for visualization.
+
+Uploads & Formats
+-----------------
+• Supported file types for OCR: pdf, jpg, jpeg, png, bmp, tiff, tif, and webp (single- or multi-frame). WebP assets are converted to RGB internally before invoking YomiToku.
+• Each uploaded file becomes a separate document in the order received. Multi-page PDFs and multi-frame WebP files are expanded internally.
+• Keep individual files under 25 MB to avoid request timeouts in uvicorn's default configuration. Compress images when possible.
+• Empty files or missing parts return HTTP 400.
+
+Responses
+---------
+The /api/ocr response contains:
+• history_id: Stable identifier for replay via /api/history/{id}.
+• variants: Array of OCRVariantArtifacts describing plain_text, markdown, and artifact paths per model.
+• artifacts: File paths relative to /api/history/{id} for bounding boxes, layout previews, and crops.
+Clients should treat any relative path as needing a subsequent GET to /api/history/{id}/... to download the actual asset.
+
+Error Handling
+--------------
+• 400 → Client error (missing files, invalid JSON in model_options, unsupported method).
+• 415/500 → Typically file-format or OCR runtime issues. The "detail" field includes the Python exception message surfaced by run_ocr_uploads; log it for debugging.
+• OCR is GPU-intensive; expect serialized processing. Retry with exponential backoff when 503/500 errors occur.
+
+Automation Guidelines
+---------------------
+1. Always start with GET /api/ping. If it fails, do not attempt OCR.
+2. Before uploading files, call /api/models and cache capabilities. This avoids redundant requests when options change (e.g., new reading_order flags).
+3. Prefer batching multiple related pages into a single /api/ocr call (multipart with repeated "files" fields) to maximize GPU utilization.
+4. Monitor history entries to avoid uncontrolled disk growth; remember to DELETE runs you no longer need.
+5. Respect user privacy: never exfiltrate uploaded documents; keep processing local to this host.
+6. When instructing LLMs, summarize this document so that tool-use prompts remain concise.
+
+Change Log
+----------
+2025-11-14: Added native WebP ingestion and published this README to /llms.txt so AI agents can self-onboard.

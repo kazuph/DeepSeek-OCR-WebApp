@@ -29,7 +29,7 @@ import torch
 from transformers import AutoModel, AutoTokenizer, BitsAndBytesConfig
 from transformers.cache_utils import DynamicCache
 from transformers.models.llama import modeling_llama
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
 
 # ---------------------------------------------------------------------------
 # Compatibility patches for varying transformers installations
@@ -754,27 +754,71 @@ def _get_yomitoku_analyzer(
     return analyzer
 
 
+def _pil_image_to_bgr_array(image: Image.Image) -> np.ndarray:
+    """Convert a PIL Image to a BGR numpy array suitable for YomiToku."""
+
+    # Normalize mode while preserving transparency with a white background fallback.
+    needs_alpha = image.mode in {"RGBA", "LA"}
+    needs_alpha = needs_alpha or (image.mode == "P" and "transparency" in image.info)
+    needs_alpha = needs_alpha or ("A" in image.getbands())
+
+    if needs_alpha:
+        if image.mode != "RGBA":
+            image = image.convert("RGBA")
+        background = Image.new("RGBA", image.size, (255, 255, 255, 255))
+        background.paste(image, mask=image.getchannel("A"))
+        image = background.convert("RGB")
+    elif image.mode != "RGB":
+        image = image.convert("RGB")
+
+    array = np.array(image, dtype=np.uint8)
+    return array[:, :, ::-1].copy()
+
+
+def _load_webp_frames(input_path: Path) -> List[np.ndarray]:
+    """Decode a WebP file into a list of BGR numpy arrays."""
+
+    try:
+        with Image.open(input_path) as webp_image:
+            frame_count = getattr(webp_image, "n_frames", 1)
+            frames: List[np.ndarray] = []
+            for frame_index in range(frame_count):
+                if frame_index:
+                    webp_image.seek(frame_index)
+                frame = webp_image.copy()
+                frames.append(_pil_image_to_bgr_array(frame))
+    except (UnidentifiedImageError, OSError) as exc:
+        raise ValueError(f"Failed to decode WebP image: {input_path}") from exc
+
+    if not frames:
+        raise RuntimeError(f"WebP decoding produced no frames: {input_path}")
+
+    LOGGER.info("Converted WebP input to %d frame(s) for YomiToku: %s", len(frames), input_path)
+    return frames
+
+
 def _load_yomitoku_pages(input_path: Path) -> List[np.ndarray]:
     from yomitoku.data.functions import load_image, load_pdf  # type: ignore
 
     suffix = input_path.suffix.lower()
     LOGGER.info(f"YomiToku loading file: {input_path} (suffix: {suffix})")
-    
+
     if suffix == ".pdf":
         pages = load_pdf(str(input_path))
+    elif suffix == ".webp":
+        pages = _load_webp_frames(input_path)
     else:
         try:
             pages = load_image(str(input_path))
         except ValueError as exc:
-            # Provide more helpful error message for unsupported formats
-            supported_formats = ['jpg', 'jpeg', 'png', 'bmp', 'tiff', 'tif', 'pdf']
+            supported_formats = ["jpg", "jpeg", "png", "bmp", "tiff", "tif", "pdf"]
             error_msg = (
                 f"YomiToku does not support the image format '{suffix or '(no extension)'}'. "
                 f"Supported formats: {', '.join(supported_formats)}"
             )
             LOGGER.error(f"{error_msg}. File: {input_path}")
             raise ValueError(error_msg) from exc
-    
+
     if not pages:
         raise RuntimeError("YomiToku produced no renderable pages.")
     return pages

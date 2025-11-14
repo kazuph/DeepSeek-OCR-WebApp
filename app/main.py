@@ -6,7 +6,7 @@ from typing import List, Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.ocr_engine import (
@@ -30,6 +30,7 @@ app.add_middleware(
 )
 
 static_dir = Path(__file__).parent / "static"
+llms_path = Path(__file__).parent / "llms.txt"
 app.mount("/static", StaticFiles(directory=static_dir), name="static")
 
 
@@ -60,6 +61,13 @@ def _resolve_history_file(entry_dir: Path, relative_path: str, variant_key: Opti
 async def root() -> str:
     index_path = static_dir / "index.html"
     return index_path.read_text(encoding="utf-8")
+
+
+@app.get("/llms.txt", response_class=PlainTextResponse)
+async def llms_txt() -> str:
+    if not llms_path.exists():
+        raise HTTPException(status_code=404, detail="llms.txt not available")
+    return llms_path.read_text(encoding="utf-8")
 
 
 @app.get("/favicon.ico", include_in_schema=False)
