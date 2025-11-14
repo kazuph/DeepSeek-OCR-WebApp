@@ -21,6 +21,7 @@ const inputPreviewSection = document.getElementById('input-preview-section');
 const inputPreviewGrid = document.getElementById('input-preview-grid');
 const progressWrapper = document.getElementById('progress-wrapper');
 const progressBar = document.getElementById('progress-bar');
+const textFilterRadios = Array.from(document.querySelectorAll('input[name="text-filter"]'));
 const MODEL_PRIORITIES = {
   yomitoku: 0,
   deepseek: 1,
@@ -60,10 +61,18 @@ const PROMPT_PRESETS = {
   document: '<image>\n<|grounding|>Convert the document to markdown.',
   pictureBook: '<image>\n<|grounding|>Convert the picture book to markdown by extracting only the text from each panel exactly as written.',
 };
+const TEXT_FILTER_STORAGE_KEY = 'ocr.textFilterMode';
+const TEXT_FILTER_LABELS = {
+  none: '変換なし',
+  katakana_to_hiragana: 'カタカナ→ひらがな',
+  full_hiragana: '全文ひらがな',
+  kyouiku_kanji: '教育漢字まで',
+};
 
 const modelTimerHandles = new Map();
 let deepseekPromptTextarea = null;
 let deepseekPromptState = loadPromptState();
+let textFilterSelection = loadStoredTextFilter();
 
 function buildPlaceholderDataUrl(label) {
   const safeLabel = (label || '').toUpperCase().replace(/[^A-Z0-9+]/g, '').slice(0, 6) || 'FILE';
@@ -355,6 +364,52 @@ function loadStoredModelOptions() {
   } catch (error) {
     console.debug('モデルオプションの読み込みに失敗しました', error);
   }
+}
+
+function loadStoredTextFilter() {
+  try {
+    const stored = localStorage.getItem(TEXT_FILTER_STORAGE_KEY);
+    if (stored && Object.prototype.hasOwnProperty.call(TEXT_FILTER_LABELS, stored)) {
+      return stored;
+    }
+  } catch (error) {
+    console.debug('テキスト整形の読み込みに失敗しました', error);
+  }
+  return 'none';
+}
+
+function getTextFilterValue() {
+  return textFilterSelection || 'none';
+}
+
+function setTextFilterSelection(value) {
+  const normalized = Object.prototype.hasOwnProperty.call(TEXT_FILTER_LABELS, value) ? value : 'none';
+  textFilterSelection = normalized;
+  try {
+    localStorage.setItem(TEXT_FILTER_STORAGE_KEY, normalized);
+  } catch (error) {
+    console.debug('テキスト整形の保存に失敗しました', error);
+  }
+  syncTextFilterRadios();
+}
+
+function syncTextFilterRadios() {
+  if (!textFilterRadios || !textFilterRadios.length) return;
+  const current = getTextFilterValue();
+  textFilterRadios.forEach((radio) => {
+    radio.checked = radio.value === current;
+  });
+}
+
+function initTextFilterControls() {
+  syncTextFilterRadios();
+  textFilterRadios.forEach((radio) => {
+    radio.addEventListener('change', () => {
+      if (radio.checked) {
+        setTextFilterSelection(radio.value);
+      }
+    });
+  });
 }
 
 function ensureModelOptionDefaults() {
@@ -1925,21 +1980,31 @@ function normalizeLayoutImages(images, fallbackUrl = null, label = 'layout') {
 
 function normalizeVariants(data) {
   if (Array.isArray(data?.variants) && data.variants.length) {
-    return data.variants.map((variant, index) => ({
-      key: variant.model || `model-${index}`,
-      label: variant.label || labelForModel(variant.model || `model-${index}`),
-      textPlain: variant.text_plain || '',
-      textMarkdown: variant.text_markdown || '',
-      boundingUrl: variant.bounding_image_url || null,
-      boundingImages: normalizeBoundingImages(variant.bounding_images, variant.bounding_image_url, variant.label),
-      layoutUrl: variant.layout_image_url || null,
-      layoutImages: normalizeLayoutImages(variant.layout_images, variant.layout_image_url, variant.label),
-      crops: Array.isArray(variant.crops) ? variant.crops : [],
-      previewUrl: variant.preview_image_url || null,
-      metadata: variant.metadata || {},
-      preview: variant.preview || '',
-      elapsedSeconds: typeof variant.elapsed_seconds === 'number' ? variant.elapsed_seconds : null,
-    }));
+    return data.variants.map((variant, index) => {
+      const metadata = variant.metadata || {};
+      const textFilterMode = metadata.text_filter_mode || metadata.textFilterMode || null;
+      const textFilterLabel = metadata.text_filter_label
+        || metadata.textFilterLabel
+        || (textFilterMode && TEXT_FILTER_LABELS[textFilterMode])
+        || null;
+      return {
+        key: variant.model || `model-${index}`,
+        label: variant.label || labelForModel(variant.model || `model-${index}`),
+        textPlain: variant.text_plain || '',
+        textMarkdown: variant.text_markdown || '',
+        boundingUrl: variant.bounding_image_url || null,
+        boundingImages: normalizeBoundingImages(variant.bounding_images, variant.bounding_image_url, variant.label),
+        layoutUrl: variant.layout_image_url || null,
+        layoutImages: normalizeLayoutImages(variant.layout_images, variant.layout_image_url, variant.label),
+        crops: Array.isArray(variant.crops) ? variant.crops : [],
+        previewUrl: variant.preview_image_url || null,
+        metadata,
+        preview: variant.preview || '',
+        elapsedSeconds: typeof variant.elapsed_seconds === 'number' ? variant.elapsed_seconds : null,
+        textFilterLabel,
+        textFilterMode,
+      };
+    });
   }
 
   return [
@@ -1957,6 +2022,8 @@ function normalizeVariants(data) {
       metadata: data?.metadata || {},
       preview: data?.preview || '',
       elapsedSeconds: typeof data?.metadata?.elapsed_seconds === 'number' ? data.metadata.elapsed_seconds : null,
+      textFilterLabel: (data?.metadata?.text_filter_label || (data?.metadata?.text_filter_mode && TEXT_FILTER_LABELS[data.metadata.text_filter_mode])) || null,
+      textFilterMode: data?.metadata?.text_filter_mode || null,
     },
   ];
 }
@@ -1988,6 +2055,9 @@ function createVariantHeader(variant, context, extraMeta = '') {
   const metaParts = [];
   if (extraMeta) {
     metaParts.push(extraMeta);
+  }
+  if (variant.textFilterLabel) {
+    metaParts.push(`整形: ${variant.textFilterLabel}`);
   }
   if (typeof variant.elapsedSeconds === 'number') {
     metaParts.push(`処理: ${variant.elapsedSeconds.toFixed(2)}秒`);
@@ -2363,6 +2433,13 @@ function ensureVariantObject(source, fallbackKey) {
     elapsed_seconds: typeof source?.elapsed_seconds === 'number'
       ? source.elapsed_seconds
       : (typeof source?.metadata?.elapsed_seconds === 'number' ? source.metadata.elapsed_seconds : null),
+    textFilterLabel: source?.textFilterLabel
+      || source?.metadata?.text_filter_label
+      || (source?.metadata?.text_filter_mode && TEXT_FILTER_LABELS[source.metadata.text_filter_mode])
+      || null,
+    textFilterMode: source?.textFilterMode
+      || source?.metadata?.text_filter_mode
+      || null,
   };
   return variant;
 }
@@ -2760,6 +2837,7 @@ async function uploadModelVariant(item, modelKey) {
   if (item.historyId) {
     formData.append('history_id', item.historyId);
   }
+  formData.append('text_filter', getTextFilterValue());
 
   const optionPayload = buildModelOptionPayload(modelKey);
   if (optionPayload) {
@@ -2970,6 +3048,7 @@ async function deleteHistoryEntry(id, filename) {
   }
 }
 
+initTextFilterControls();
 loadStoredModelSelection();
 loadStoredModelOptions();
 updateModelInfo();

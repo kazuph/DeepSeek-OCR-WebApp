@@ -26,6 +26,14 @@ Uploads & Formats
 • Keep individual files under 25 MB to avoid request timeouts in uvicorn's default configuration. Compress images when possible.
 • Empty files or missing parts return HTTP 400.
 
+Text Simplification
+-------------------
+• Optional form field `text_filter` controls post-OCR normalization. Accepted values: `none` (default), `katakana_to_hiragana`, `full_hiragana`, `kyouiku_kanji`.
+• `katakana_to_hiragana` only converts katakana terms, leaving kanji untouched.
+• `full_hiragana` renders the full string in hiragana using dictionary readings.
+• `kyouiku_kanji` keeps only elementary-school kanji; harder characters are replaced with their hiragana readings.
+• The selected mode is recorded in each variant's `metadata.text_filter_mode`/`text_filter_label` so downstream automation can detect how the text was simplified.
+
 Responses
 ---------
 The /api/ocr response contains:

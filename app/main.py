@@ -109,6 +109,7 @@ async def ocr_endpoint(
     models: str | None = Form(default=None),
     history_id: str | None = Form(default=None),
     model_options: str | None = Form(default=None),
+    text_filter: str | None = Form(default=None),
 ) -> dict[str, object]:
     uploads: List[UploadFile] = []
     if files:
@@ -145,6 +146,8 @@ async def ocr_endpoint(
             if not isinstance(parsed_options, dict):
                 raise HTTPException(status_code=400, detail="model_options must be an object")
             kwargs["model_options"] = parsed_options
+        if text_filter:
+            kwargs["text_filter"] = text_filter
         result = run_ocr_uploads(payloads, **kwargs)
     except Exception as exc:  # noqa: BLE001 - surface to client
         raise HTTPException(status_code=500, detail=f"OCR failed: {exc}") from exc

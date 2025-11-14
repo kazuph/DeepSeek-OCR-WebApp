@@ -9,4 +9,7 @@ Pillow
 numpy
 matplotlib
 yomitoku>=0.9.5
+jaconv
+fugashi[unidic-lite]
+pytest
 # optional: install `bitsandbytes` + `accelerate` on CUDA GPUs to enable the 4-bit quantized variant

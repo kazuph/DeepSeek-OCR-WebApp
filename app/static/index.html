@@ -50,6 +50,40 @@
             <div class="metadata" id="model-info">モデル初期化待機中…</div>
           </section>
 
+          <section class="section" id="text-filter-section">
+            <h2>テキスト整形</h2>
+            <div class="text-filter-options" id="text-filter-options">
+              <label class="text-filter-option">
+                <input type="radio" name="text-filter" value="none" checked />
+                <div class="text-filter-body">
+                  <span class="text-filter-label">変換しない</span>
+                  <span class="text-filter-description">OCRの生テキストをそのまま表示します。</span>
+                </div>
+              </label>
+              <label class="text-filter-option">
+                <input type="radio" name="text-filter" value="katakana_to_hiragana" />
+                <div class="text-filter-body">
+                  <span class="text-filter-label">カタカナ→ひらがな</span>
+                  <span class="text-filter-description">漢字はそのままに、カタカナ語だけをひらがな化します。</span>
+                </div>
+              </label>
+              <label class="text-filter-option">
+                <input type="radio" name="text-filter" value="full_hiragana" />
+                <div class="text-filter-body">
+                  <span class="text-filter-label">全文ひらがな</span>
+                  <span class="text-filter-description">文章全体をひらがなに変換します（記号は保持）。</span>
+                </div>
+              </label>
+              <label class="text-filter-option">
+                <input type="radio" name="text-filter" value="kyouiku_kanji" />
+                <div class="text-filter-body">
+                  <span class="text-filter-label">教育漢字まで</span>
+                  <span class="text-filter-description">小学生で習う漢字以外は自動でふりがな化します。</span>
+                </div>
+              </label>
+            </div>
+          </section>
+
           <section class="section hidden" id="input-preview-section">
             <h2>入力画像</h2>
             <div class="preview-grid" id="input-preview-grid"></div>

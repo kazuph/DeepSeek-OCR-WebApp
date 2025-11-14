@@ -17,7 +17,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Callable
 from urllib.parse import quote
 
 import importlib
@@ -30,6 +30,8 @@ from transformers import AutoModel, AutoTokenizer, BitsAndBytesConfig
 from transformers.cache_utils import DynamicCache
 from transformers.models.llama import modeling_llama
 from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError
+
+from app import text_simplifier
 
 # ---------------------------------------------------------------------------
 # Compatibility patches for varying transformers installations
@@ -230,6 +232,63 @@ MODEL_DESCRIPTORS: List[ModelDescriptor] = [
         ),
     ),
 ]
+
+
+TEXT_FILTER_LABELS: Dict[str, str] = {
+    "katakana_to_hiragana": "カタカナ→ひらがな",
+    "full_hiragana": "全文ひらがな",
+    "kyouiku_kanji": "教育漢字レベル",
+}
+
+_TEXT_FILTER_FUNCS: Dict[str, Callable[[str], str]] = {
+    "katakana_to_hiragana": text_simplifier.katakana_to_hiragana,
+    "full_hiragana": text_simplifier.text_to_hiragana,
+    "kyouiku_kanji": text_simplifier.limit_to_kyouiku_kanji,
+}
+
+_TEXT_FILTER_ALIASES: Dict[str, str] = {
+    "": "none",
+    "none": "none",
+    "off": "none",
+    "disable": "none",
+    "katakana": "katakana_to_hiragana",
+    "katakana_to_hiragana": "katakana_to_hiragana",
+    "katakana2hiragana": "katakana_to_hiragana",
+    "kata2hira": "katakana_to_hiragana",
+    "full_hiragana": "full_hiragana",
+    "hiragana": "full_hiragana",
+    "all_hiragana": "full_hiragana",
+    "kyouiku": "kyouiku_kanji",
+    "kyouiku_kanji": "kyouiku_kanji",
+    "elementary": "kyouiku_kanji",
+}
+
+
+def _normalize_text_filter(value: Optional[str]) -> str:
+    normalized = (value or "").strip().lower()
+    return _TEXT_FILTER_ALIASES.get(normalized, "none")
+
+
+def _apply_text_filter_to_variant(variant: OCRVariantArtifacts, mode: str) -> None:
+    if not mode or mode == "none":
+        return
+    func = _TEXT_FILTER_FUNCS.get(mode)
+    if func is None:
+        return
+
+    plain_source = variant.text_plain or variant.text_markdown or ""
+    markdown_source = variant.text_markdown or variant.text_plain or ""
+
+    variant.text_plain = func(plain_source)
+    variant.text_markdown = func(markdown_source)
+
+    extras = dict(variant.extras or {})
+    extras["text_filter_mode"] = mode
+    extras["text_filter_label"] = TEXT_FILTER_LABELS.get(mode, mode)
+    variant.extras = extras
+
+    if variant.text_path and variant.text_path.exists():
+        variant.text_path.write_text(variant.text_markdown, encoding="utf-8")
 
 MODEL_DESCRIPTOR_MAP: Dict[str, ModelDescriptor] = {item.key: item for item in MODEL_DESCRIPTORS}
 MODEL_ORDER: Dict[str, int] = {descriptor.key: index for index, descriptor in enumerate(MODEL_DESCRIPTORS)}
@@ -1772,6 +1831,7 @@ def run_ocr_bytes(
     crop_mode: bool = True,
     attn_impl: str = "flash_attention_2",
     model_options: Optional[Mapping[str, Any]] = None,
+    text_filter: Optional[str] = None,
 ) -> dict[str, object]:
     """Run OCR on an in-memory image and return artefacts for web responses."""
 
@@ -1790,6 +1850,7 @@ def run_ocr_bytes(
         crop_mode=crop_mode,
         attn_impl=attn_impl,
         model_options=model_options,
+        text_filter=text_filter,
     )
 
 
@@ -1805,6 +1866,7 @@ def run_ocr_uploads(
     crop_mode: bool = True,
     attn_impl: str = "flash_attention_2",
     model_options: Optional[Mapping[str, Any]] = None,
+    text_filter: Optional[str] = None,
 ) -> dict[str, object]:
     """Run OCR on one or more uploaded files and persist results."""
 
@@ -1817,6 +1879,8 @@ def run_ocr_uploads(
         options_by_model = model_options
     else:
         options_by_model = {}
+
+    text_filter_mode = _normalize_text_filter(text_filter)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_path = Path(tmpdir)
@@ -1931,6 +1995,7 @@ def run_ocr_uploads(
                     )
                 else:
                     raise ValueError(f"Unsupported OCR model '{key}'")
+                _apply_text_filter_to_variant(variant, text_filter_mode)
                 elapsed = time.perf_counter() - start_time
                 extras = variant.extras.copy() if variant.extras else {}
                 extras["elapsed_seconds"] = round(elapsed, 3)
@@ -2021,6 +2086,9 @@ def run_ocr_uploads(
             "models": [variant.get("model") for variant in variant_payloads],
             "warnings": variant_errors,
         }
+        if text_filter_mode != "none":
+            response_metadata["text_filter_mode"] = text_filter_mode
+            response_metadata["text_filter_label"] = TEXT_FILTER_LABELS.get(text_filter_mode, text_filter_mode)
 
         return {
             "history_id": entry_id,

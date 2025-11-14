@@ -231,6 +231,54 @@ h1 {
   gap: 12px;
 }
 
+.text-filter-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.text-filter-option {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 12px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  cursor: pointer;
+  transition: border-color 0.2s ease, background 0.2s ease;
+  min-width: 220px;
+}
+
+.text-filter-option input[type="radio"] {
+  width: 18px;
+  height: 18px;
+  margin-top: 4px;
+}
+
+.text-filter-option:hover,
+.text-filter-option:focus-within {
+  border-color: #ff9800;
+  background: rgba(255, 152, 0, 0.1);
+}
+
+.text-filter-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.text-filter-label {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.text-filter-description {
+  font-size: 12px;
+  opacity: 0.75;
+  line-height: 1.5;
+}
+
 .model-option {
   display: flex;
   flex-direction: column;
