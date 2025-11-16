@@ -49,6 +49,8 @@ RUN pip install --no-cache-dir \
         Pillow \
         numpy \
         tqdm \
+        jaconv \
+        "fugashi[unidic-lite]" \
         bitsandbytes \
         accelerate \
         yomitoku>=0.9.5 && \
